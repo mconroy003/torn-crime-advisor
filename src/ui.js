@@ -52,6 +52,15 @@ function rowTitle(row) {
   return norm(row.textContent).slice(0, 40);
 }
 
+function headerLine(text) {
+  const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
+  if (!header || !header.parentNode) return;
+  let line = document.getElementById('ca-line');
+  if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
+  if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
+  if (line.textContent !== text) line.textContent = text;
+}
+
 const UI = {
   mounted: false,
 
@@ -66,9 +75,10 @@ const UI = {
   render() {
     if (!this.mounted) return;
     try {
+      const here = currentCrime();
+      if (here) ReactBackup.tryRead(here, () => {});
       const data = Store.load();
       const ranking = rankAll(data);
-      const here = currentCrime();
       if (here) this.crimePage(here, ranking); else this.hub(ranking);
       Store.save();
     } catch (e) { console.warn('[CrimeAdvisor]', e); }
@@ -76,6 +86,10 @@ const UI = {
 
   // ---- Crime Hub: one badge per card ----
   hub({ top, rows }) {
+    const nerve = readNerve();
+    const plan = planNerve(rows, nerve);
+    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})` : 'Open the crimes you play once so the Advisor can read them';
+    headerLine([head, planText(plan, nerve), capWarning(nerve)].filter(Boolean).join(' · '));
     document.querySelectorAll('.crimes-hub-root a, .crimes-hub-crime').forEach(card => {
       const titleEl = card.querySelector('[class*="crimeTitle__"]');
       if (!titleEl) return;
@@ -96,21 +110,18 @@ const UI = {
     if (!r) return;
 
     // One line under the header: your $/N here, the best crime now, and this crime's status.
-    const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
-    if (header && header.parentNode) {
-      let line = document.getElementById('ca-line');
-      if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
-      if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
-      const parts = [`Your ${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
+    {
+      const parts = [`${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
       if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
       else if (top) parts.push('★ Best crime right now');
+      const cap = capWarning(readNerve());
+      if (cap) parts.push(cap);
       let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
       if (!r.seenAt) {
-        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data seen this page load: ${Diag.read}` +
-          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') +
-          ' — press F5 on this page so Torn reloads the crime data.';
+        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data read this page load: ${Diag.read}` +
+          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') + ' — press F5 so Torn reloads the crime data.';
       }
-      if (line.textContent !== text) line.textContent = text;
+      headerLine(text);
     }
 
     const optRows = Array.from(document.querySelectorAll('[class*="crimeOptionSection__"]'));

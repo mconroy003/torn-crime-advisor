@@ -2,18 +2,6 @@
 // Each returns { actionable, note, options: [{ label, detail, best }] }.
 // Cross-crime ranking uses measured $/N (crimeRate); analyzers pick the best option inside a crime.
 
-// Cracking payout ranges from the Torn wiki (Cracking page), keyed by target title.
-const CRACK_PAYOUT = {
-  'colleague': [10e3, 30e3], 'ex-boyfriend': [10e3, 30e3], 'ex-girlfriend': [10e3, 30e3],
-  'ex-husband': [10e3, 30e3], 'ex-wife': [10e3, 30e3], 'online adversary': [10e3, 30e3],
-  'romantic interest': [10e3, 30e3], 'friend': [10e3, 25e3], 'neighbor': [10e3, 25e3], 'neighbour': [10e3, 25e3],
-  'informant': [30e3, 50e3], 'juror': [30e3, 50e3], 'doctor': [35e3, 140e3], 'judge': [40e3, 99.6e3],
-  'hacker': [50e3, 199.8e3], 'police officer': [40e3, 90e3], 'government official': [70e3, 130e3],
-  'politician': [60e3, 119.9e3], 'pornography network': [80.5e3, 149.8e3], 'campus network': [60e3, 180e3],
-  'health service': [80.1e3, 150e3], 'games developer': [60.1e3, 149e3], 'rival corporation': [80.1e3, 250e3],
-  'police department': [100.3e3, 250e3], 'criminal syndicate': [100.3e3, 348.5e3], 'government': [150.2e3, 499.4e3],
-  'internet service provider': [175e3, 294.9e3], 'armed forces': [400e3, 749.8e3], 'intelligence agency': [402.6e3, 997.6e3],
-};
 
 // Emforus: dead-body jobs are the top Disposal earners. Used only to order jobs until your own log has values.
 const DISPOSAL_PRIORITY = ['Dead Body', 'Body Part', 'Murder Weapon', 'Firearm', 'Vehicle'];
@@ -64,7 +52,7 @@ function sfcByClock(title, now) {
 }
 
 const Analyzers = {
-  9(db, data) { // Disposal
+  9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
     const opts = jobs.map(job => {
       const methods = (job.methods || []).filter(m => m.available !== false && !m.locked).map(m => {
@@ -77,8 +65,9 @@ const Analyzers = {
       methods.sort((a, b) => (b.learned ? 1 : 0) - (a.learned ? 1 : 0) || b.score - a.score);
       const best = methods[0];
       const pr = DISPOSAL_PRIORITY.indexOf(job.title);
+      const b = blend(ctx.rate, best.learned);
       return {
-        key: job.title, method: best.m.title,
+        key: job.title, method: best.m.title, perN: b.perN, nerve: best.m.nerve, units: 1, src: b.src,
         short: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}%` + (best.learned ? ` · ${fmt.perN(best.learned.perNerve)}` : ''),
         label: job.title + (job.expiresSoon ? ' (expires soon)' : ''),
         detail: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}% success (${best.sr.suc}/${best.sr.att})` +
@@ -104,11 +93,10 @@ const Analyzers = {
       const units = chars.reduce((s, c) => s + ((c.char && c.char !== '*') ? 0 : (c.status || 0)), 0);
       const revealed = chars.some(c => c.char && c.char !== '*');
       const nerve = Math.round(Math.ceil(units / power) * 7 / brute + 5);
-      const range = CRACK_PAYOUT[String(t.title).toLowerCase()];
-      const mid = range ? (range[0] + range[1]) / 2 : null;
-      const perN = mid ? mid / nerve : null;
+      const range = REF.cracking[String(t.title).toLowerCase()];
+      const perN = range ? mid(range) / nerve : null;
       return {
-        service: t.service,
+        key: t.title, service: t.service, perN, nerve, units: 1, src: 'wiki est',
         short: `${perN ? 'est ' + fmt.perN(perN) : 'payout unknown'} · ~${nerve}N`,
         label: `${t.title} — ${t.service}${revealed ? ' (in progress)' : ''}`,
         detail: `${chars.length} chars · ~${nerve}N left · ${range ? `${fmt.money(range[0])}–${fmt.money(range[1])}` : 'payout unknown'}` +
@@ -126,7 +114,7 @@ const Analyzers = {
     };
   },
 
-  4(db, data) { // Shoplifting
+  4(db, data, ctx) { // Shoplifting
     const now = Date.now();
     const stores = Array.isArray(db.crimesByType) ? db.crimesByType : [];
     const opts = stores.map(s => {
@@ -139,8 +127,10 @@ const Analyzers = {
       });
       const learned = actionValue(data, 4, s.crimeID);
       const downTxt = down.map(e => `${e.title} down (seen ${fmt.ago(data.outages[`${s.title}|${e.title}`])})`).join(', ');
+      const b = blend(ctx.rate, learned);
+      const allDown = fx.length > 0 && down.length === fx.length;
       return {
-        key: s.title,
+        key: s.title, perN: (allDown || learned) ? b.perN : null, nerve: s.nerve || 4, units: Infinity, src: b.src,
         short: (down.length === fx.length && fx.length ? 'all security down' : `${down.length}/${fx.length} down`) + (learned ? ` · ${fmt.perN(learned.perNerve)}` : ''),
         label: s.title,
         detail: `${down.length}/${fx.length} security down${downTxt ? ': ' + downTxt : ''} · notoriety ${info.notoriety || 0}%` +
@@ -195,25 +185,47 @@ const Analyzers = {
     return { actionable: true, note: d.length ? `Lowest district reputation: ${Math.min(...d)} stars` : '', options: [] };
   },
 
-  5() { return { actionable: true, note: 'Targets are live; check the page for good ones', options: [] }; },
+  5(db, data) { // Pickpocketing: marks are live for seconds, so this only labels the page
+    const marks = Array.isArray(db.crimesByType) ? db.crimesByType : [];
+    const opts = marks.map(m => {
+      const range = REF.pickpocketing[String(m.title).toLowerCase()];
+      const sr = successRate(db.stats, m.crimeID);
+      const b = blend(range ? mid(range) * sr.p / (m.nerve || 5) : null, actionValue(data, 5, m.crimeID));
+      const status = m.crimeInfo && m.crimeInfo.status ? m.crimeInfo.status.title : '';
+      const learnedPP = actionValue(data, 5, m.crimeID);
+      return { key: m.title, perN: b.perN, nerve: m.nerve || 5, units: 0, src: b.src, noPick: !learnedPP,
+        short: b.perN !== null ? `${fmt.perN(b.perN)} · ${Math.round(sr.p * 100)}%` : `${Math.round(sr.p * 100)}%`,
+        label: m.title, detail: `${status} · ${range ? `${fmt.money(range[0])}–${fmt.money(range[1])}` : 'cash unknown'} · ${b.src}`,
+        sort: b.perN || 0 };
+    }).sort((a, b) => b.sort - a.sort);
+    if (opts.length && opts[0].perN) opts[0].best = true;
+    return { actionable: true, note: 'Marks are live for seconds; the page labels show which are worth 5N', options: opts };
+  },
 
   6(db) { // Card Skimming
     const s = db.stats || {};
     return { actionable: (s.cardsRecoverable || 0) > 0, note: `${s.skimmersActive ?? '?'} skimmers active · ${s.cardsRecoverable ?? 0} card details recoverable`, options: [] };
   },
 
-  7(db) { // Burglary
+  7(db, data) { // Burglary
     const props = ((db.crimesByType && db.crimesByType.properties) || []).filter(p => !(p.expire && p.expire * 1000 < Date.now()));
     const soon = props.filter(p => p.expiresSoon).length;
-    const opts = props.map(p => ({
-      key: p.title,
+    const opts = props.map(p => {
+      const range = REF.burglary[String(p.title).toLowerCase()];
+      const sr = successRate(db.stats, p.burgleCrimeID);
+      const nerve = (p.burgleNerve || 6) + (p.confidence >= 40 ? 0 : 2 * (p.caseNerve || 2));
+      const b = blend(range ? mid(range) * sr.p / nerve : null, actionValue(data, 7, p.burgleCrimeID));
+      // Burglary pays cash only some of the time, so the wiki range alone can't drive the top pick.
+      const learnedB = actionValue(data, 7, p.burgleCrimeID);
+      return {
+      key: p.title, perN: b.perN, nerve, units: 1, src: b.src + (range ? ' + items' : ''), noPick: !learnedB,
       short: `${p.confidence}% confidence` + (p.recommendedItem && !p.recommendedItem.owned ? ` · missing ${p.recommendedItem.title}` : '') + (p.expiresSoon ? ' · expiring' : ''),
       label: p.title,
       detail: `confidence ${p.confidence}% · ${p.safetyStatus}` +
         (p.recommendedItem ? ` · needs ${p.recommendedItem.title}${p.recommendedItem.owned ? ' (owned)' : ' (MISSING)'}` : '') +
         ` · expires in ${fmt.dur(p.expire - Date.now() / 1000)}`,
-      sort: (p.safetyStatus === 'safe' ? 1000 : 0) + p.confidence,
-    })).sort((a, b) => b.sort - a.sort);
+      sort: (b.perN || 0) + (p.safetyStatus === 'safe' ? 1e6 : 0) + p.confidence,
+    }; }).sort((a, b) => b.sort - a.sort);
     if (opts.length) opts[0].best = true;
     return { actionable: props.length > 0, note: `${props.length} targets scouted${soon ? ` · ${soon} expiring soon` : ''}`, options: opts };
   },
@@ -227,8 +239,24 @@ const Analyzers = {
 
   11(db) { // Forgery
     const c = db.crimesByType || {};
+    const st = db.stats || {};
+    const att = Object.values(st.crimesByIDAttempts || {}).reduce((a, b) => a + b, 0);
+    const suc = Object.values(st.crimesByIDAttemptsSucc || {}).reduce((a, b) => a + b, 0);
+    const pStep = att ? (suc + 4) / (att + 5) : 0.9;
+    const opts = (c.beginProject || []).filter(bp => bp.available !== false).map(bp => {
+      const name = String(bp.title).replace(/^Begin /, '').replace(/ project$/, '');
+      const price = REF.forgery[name.toLowerCase()];
+      const steps = (bp.steps || []).length || 4;
+      const nerve = steps * 5;
+      const perN = price ? price * Math.pow(pStep, steps) / nerve : null;
+      return { key: name, perN, nerve, units: Infinity, src: 'before materials', noPick: true,
+        short: perN ? `est ${fmt.perN(perN)} · ${nerve}N` : 'price unknown',
+        label: name, detail: `${steps} steps · ${nerve}N · ${price ? fmt.money(price) + ' at the Print Store, before materials' : 'price unknown'}`,
+        sort: perN || 0 };
+    }).sort((a, b) => b.sort - a.sort);
+    if (opts.length && opts[0].perN) opts[0].best = true;
     const n = (c.projects || []).length;
-    return { actionable: n > 0, note: `${n} projects active · pays in items (needs item prices)`, options: [] };
+    return { actionable: opts.some(o => o.perN), note: `${n} projects active${opts[0] && opts[0].perN ? ` · best: ${opts[0].label}` : ''}`, options: opts };
   },
 
   12(db) { // Scamming
@@ -254,6 +282,8 @@ const Analyzers = {
 };
 
 // Build the ranked list across all crimes.
+const pickableCount = opts => opts.filter(o => !o.noPick).length;
+
 function rankAll(data) {
   const rows = Object.keys(CRIMES).map(Number).map(typeID => {
     const st = data.state[typeID];
@@ -265,22 +295,31 @@ function rankAll(data) {
       // A new TCT day: yesterday's list is gone and new ones have spawned.
       a = { actionable: true, note: `New ${DAILY[typeID]} since 00:00 TCT — open to see them`, options: [] };
     } else if (st && Analyzers[typeID]) {
-      try { a = Analyzers[typeID](st.db, data, { now, fresh }); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
+      try { a = Analyzers[typeID](st.db, data, { now, fresh, rate: rate.rate }); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
       if (fresh.stale) a.note = `${a.note} (as of ${fmt.ago(st.seenAt)})`;
     }
     if (DAILY[typeID] && st && !fresh.newDay && !a.actionable) {
       a.note = `${a.note} · next ${DAILY[typeID]} in ${fmt.dur((lastTctMidnight(now) + 86400000 - now) / 1000)}`;
     }
-    return { typeID, name: CRIMES[typeID], rate: rate.rate, source: rate.source, seenAt: st && st.seenAt,
-      stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, ...a };
+    // "now": the best option's estimate where the crime has per-option numbers (and isn't live-only), else your crime rate.
+    const plannable = (a.options || []).filter(o => o.perN !== null && o.perN !== undefined && o.units !== 0);
+    // An estimate that leaves out known costs (Forgery materials) is shown but can't be the top pick.
+    const noPick = plannable.length > 0 && pickableCount(plannable) === 0;
+    const pickable = plannable.filter(o => !o.noPick);
+    const bestOpt = (pickable.length ? pickable : plannable).sort((x, y) => y.perN - x.perN)[0];
+    const nowRate = a.actionable && bestOpt && !fresh.newDay ? bestOpt.perN : rate.rate;
+    const nowSrc = a.actionable && bestOpt && !fresh.newDay ? bestOpt.src : rate.source;
+    return { typeID, name: CRIMES[typeID], rate: nowRate, crimeRate: rate.rate, source: nowSrc, seenAt: st && st.seenAt,
+      stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, noPick, ...a };
   });
   rows.sort((x, y) => (y.actionable - x.actionable) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
-  const top = rows.find(r => r.actionable && r.rate !== null && r.rate > 0) || null;
+  const top = rows.find(r => r.actionable && !r.noPick && r.rate !== null && r.rate > 0) || null;
   rows.forEach(r => {
     if (!top || r === top) return;
     if (!r.actionable) r.why = 'nothing to do right now';
     else if (r.rate === null) r.why = r.source;
     else if (r.rate <= 0) r.why = 'has lost money overall';
+    else if (r.noPick) r.why = r.typeID === 11 ? 'estimate leaves out material costs' : 'wiki estimate; needs a few of your own tries first';
     else {
       const x = top.rate / r.rate;
       r.why = x < 1.5 ? `${top.name} pays ${Math.round((x - 1) * 100)}% more per nerve` : `${top.name} pays ~${Math.round(x)}× more per nerve`;

@@ -51,9 +51,16 @@ function recordSnapshot(data, typeID, stats, crimeID, now) {
     }
   }
   data.last[typeID] = snap;
+
+  // First snapshot of each TCT day, kept for 60 days, for the rolling recent rate.
+  const day = Math.floor(now / 86400000);
+  data.daily = data.daily || {};
+  const list = data.daily[typeID] = data.daily[typeID] || [];
+  if (!list.length || list[list.length - 1].day !== day) list.push({ day, money, nerve: snap.nerve });
+  while (list.length > 60) list.shift();
 }
 
-const Diag = { hooked: false, seen: 0, read: 0, lastStep: '', lastError: '' };
+const Diag = { hooked: false, seen: 0, read: 0, fromPage: 0, lastStep: '', lastError: '', pageLoadedAt: Date.now() };
 
 function handleResponse(url, body, json, now = Date.now()) {
   if (!url || !String(url).includes('sid=crimesData')) return false;
@@ -119,14 +126,22 @@ function installHooks(win, onChange) {
   };
 }
 
-// $/N for a crime: recent (since install) when enough nerve is spent, else lifetime.
-function crimeRate(data, typeID) {
-  const last = data.last[typeID], base = data.base[typeID];
+// $/N for a crime. Recent play (last 14 days, else since install) is blended with lifetime:
+// the more nerve spent recently, the more the recent figure counts (half-weight at 60N).
+const RECENT_DAYS = 14;
+function crimeRate(data, typeID, now = Date.now()) {
+  const last = data.last[typeID];
   if (!last || last.money === null) return { rate: null, source: last ? 'pays items' : 'not seen' };
-  if (base && last.nerve - base.nerve >= MIN_RECENT_NERVE) {
-    return { rate: (last.money - base.money) / (last.nerve - base.nerve), source: `recent, ${last.nerve - base.nerve}N` };
-  }
-  return { rate: last.nerve > 0 ? last.money / last.nerve : null, source: 'lifetime' };
+  const lifetime = last.nerve > 0 ? last.money / last.nerve : null;
+  const today = Math.floor(now / 86400000);
+  const daily = (data.daily && data.daily[typeID]) || [];
+  const from = daily.find(d => d.day >= today - RECENT_DAYS && d.money !== null) || data.base[typeID];
+  const dN = from ? last.nerve - from.nerve : 0;
+  if (!from || dN <= 0) return { rate: lifetime, source: 'lifetime' };
+  const recent = (last.money - from.money) / dN;
+  const w = dN / (dN + MIN_RECENT_NERVE);
+  const rate = lifetime === null ? recent : w * recent + (1 - w) * lifetime;
+  return { rate, source: w >= 0.5 ? `recent, ${dN}N` : `mostly lifetime, ${dN}N recent`, recent, lifetime, recentNerve: dN };
 }
 
 // Learned $/attempt for one action, if we've seen enough of it.

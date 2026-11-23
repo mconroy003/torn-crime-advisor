@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.3.0
+// @version      0.4.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -91,6 +91,57 @@ function successRate(stats, crimeID) {
   return { p: (suc + 4) / (att + 5), att, suc };
 }
 
+// ---------- reference: public payout ranges from the Torn wiki ----------
+// Starting estimates only. Each option moves toward your own results as you play (see blend()).
+// Sources: wiki.torn.com pages for Cracking, Pickpocketing, Burglary and Forgery (read Nov 2026).
+
+const REF = {
+  // Cracking target → cash range
+  cracking: {
+    'colleague': [10e3, 30e3], 'ex-boyfriend': [10e3, 30e3], 'ex-girlfriend': [10e3, 30e3],
+    'ex-husband': [10e3, 30e3], 'ex-wife': [10e3, 30e3], 'online adversary': [10e3, 30e3],
+    'romantic interest': [10e3, 30e3], 'friend': [10e3, 25e3], 'neighbor': [10e3, 25e3], 'neighbour': [10e3, 25e3],
+    'informant': [30e3, 50e3], 'juror': [30e3, 50e3], 'doctor': [35e3, 140e3], 'judge': [40e3, 99.6e3],
+    'hacker': [50e3, 199.8e3], 'police officer': [40e3, 90e3], 'government official': [70e3, 130e3],
+    'politician': [60e3, 119.9e3], 'pornography network': [80.5e3, 149.8e3], 'campus network': [60e3, 180e3],
+    'health service': [80.1e3, 150e3], 'games developer': [60.1e3, 149e3], 'rival corporation': [80.1e3, 250e3],
+    'police department': [100.3e3, 250e3], 'criminal syndicate': [100.3e3, 348.5e3], 'government': [150.2e3, 499.4e3],
+    'internet service provider': [175e3, 294.9e3], 'armed forces': [400e3, 749.8e3], 'intelligence agency': [402.6e3, 997.6e3],
+  },
+  // Pickpocketing mark → cash range (items extra). Mobster and Police Officer cash unknown.
+  pickpocketing: {
+    'businessman': [1380, 9600], 'businesswoman': [1100, 6000], 'classy lady': [1020, 79400], 'cyclist': [720, 10400],
+    'drunk man': [216, 3769], 'drunk woman': [274, 3380], 'elderly man': [460, 5000], 'elderly woman': [460, 4900],
+    'gang member': [1660, 7000], 'homeless person': [70, 2921], 'jogger': [560, 4550], 'junkie': [202, 4800],
+    'laborer': [560, 4700], 'postal worker': [746, 5792], 'rich kid': [1200, 8000], 'sex worker': [530, 5600],
+    'student': [312, 3631], 'thug': [800, 6000], 'young man': [550, 3970], 'young woman': [830, 4960],
+  },
+  // Burglary property → cash range (items extra). Only properties with a full range on the wiki.
+  burglary: {
+    'advertising agency': [31522, 76200], 'advertisement agency': [31522, 76200], 'barbershop': [10348, 49866],
+    'cleaning agency': [10300, 59450], 'dentists office': [5070, 58900], 'funeral parlor': [5150, 49290],
+    'liquor store': [5204, 49180], 'market': [10160, 68500], 'self-storage facility': [10200, 69920],
+    'brewery': [5406, 23880], 'farm storage unit': [6670, 79200], 'paper mill': [10580, 59780],
+    'printing works': [5030, 149700], 'truckyard': [5578, 146600],
+  },
+  // Forgery project → Print Store sale price (materials not included)
+  forgery: {
+    'concert ticket': 3250, 'parking permit': 6500, "driver's license": 5000, 'diploma': 50000,
+    'birth certificate': 62500, 'license plate': 95000, 'skeleton key': 80000, 'prescription': 75000,
+    'travel visa': 122500, 'bank check': 180000, 'police badge': 230000, 'passport': 580000,
+  },
+};
+
+const mid = r => (r ? (r[0] + r[1]) / 2 : null);
+
+// Move from the starting estimate toward your own $/N: half-way after 5 attempts, ~2/3 after 10.
+function blend(priorPerN, learned) {
+  if (!learned || learned.perNerve === null) return { perN: priorPerN, src: priorPerN === null ? 'unknown' : 'estimate' };
+  if (priorPerN === null) return { perN: learned.perNerve, src: `yours, ${learned.n} tries` };
+  const w = learned.n / (learned.n + 5);
+  return { perN: w * learned.perNerve + (1 - w) * priorPerN, src: `${Math.round(w * 100)}% yours, ${learned.n} tries` };
+}
+
 // ---------- data: read the crime data the page already loads ----------
 // Read-only. Never sends requests to Torn, never clicks anything.
 
@@ -144,9 +195,16 @@ function recordSnapshot(data, typeID, stats, crimeID, now) {
     }
   }
   data.last[typeID] = snap;
+
+  // First snapshot of each TCT day, kept for 60 days, for the rolling recent rate.
+  const day = Math.floor(now / 86400000);
+  data.daily = data.daily || {};
+  const list = data.daily[typeID] = data.daily[typeID] || [];
+  if (!list.length || list[list.length - 1].day !== day) list.push({ day, money, nerve: snap.nerve });
+  while (list.length > 60) list.shift();
 }
 
-const Diag = { hooked: false, seen: 0, read: 0, lastStep: '', lastError: '' };
+const Diag = { hooked: false, seen: 0, read: 0, fromPage: 0, lastStep: '', lastError: '', pageLoadedAt: Date.now() };
 
 function handleResponse(url, body, json, now = Date.now()) {
   if (!url || !String(url).includes('sid=crimesData')) return false;
@@ -212,14 +270,22 @@ function installHooks(win, onChange) {
   };
 }
 
-// $/N for a crime: recent (since install) when enough nerve is spent, else lifetime.
-function crimeRate(data, typeID) {
-  const last = data.last[typeID], base = data.base[typeID];
+// $/N for a crime. Recent play (last 14 days, else since install) is blended with lifetime:
+// the more nerve spent recently, the more the recent figure counts (half-weight at 60N).
+const RECENT_DAYS = 14;
+function crimeRate(data, typeID, now = Date.now()) {
+  const last = data.last[typeID];
   if (!last || last.money === null) return { rate: null, source: last ? 'pays items' : 'not seen' };
-  if (base && last.nerve - base.nerve >= MIN_RECENT_NERVE) {
-    return { rate: (last.money - base.money) / (last.nerve - base.nerve), source: `recent, ${last.nerve - base.nerve}N` };
-  }
-  return { rate: last.nerve > 0 ? last.money / last.nerve : null, source: 'lifetime' };
+  const lifetime = last.nerve > 0 ? last.money / last.nerve : null;
+  const today = Math.floor(now / 86400000);
+  const daily = (data.daily && data.daily[typeID]) || [];
+  const from = daily.find(d => d.day >= today - RECENT_DAYS && d.money !== null) || data.base[typeID];
+  const dN = from ? last.nerve - from.nerve : 0;
+  if (!from || dN <= 0) return { rate: lifetime, source: 'lifetime' };
+  const recent = (last.money - from.money) / dN;
+  const w = dN / (dN + MIN_RECENT_NERVE);
+  const rate = lifetime === null ? recent : w * recent + (1 - w) * lifetime;
+  return { rate, source: w >= 0.5 ? `recent, ${dN}N` : `mostly lifetime, ${dN}N recent`, recent, lifetime, recentNerve: dN };
 }
 
 // Learned $/attempt for one action, if we've seen enough of it.
@@ -229,22 +295,81 @@ function actionValue(data, typeID, crimeID, minN = 3) {
   return { perAttempt: a.money / a.n, perNerve: a.nerve ? a.money / a.nerve : null, n: a.n };
 }
 
+// ---------- react: backup reader for data the page already rendered ----------
+// If the page fetched its crime data before this script was listening, the fetch hook sees nothing.
+// React keeps that same data on the page's own elements, so we look for it there.
+// Reads only the page you're viewing; sends nothing.
+
+function reactKeyOf(el) {
+  if (!el) return null;
+  for (const k of Object.keys(el)) {
+    if (k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$') || k.startsWith('__reactContainer$')) return k;
+  }
+  return null;
+}
+
+// Look for an object that holds `crimesByType` within a few levels of `obj`.
+function findCrimeDB(obj, depth = 0, seen = new Set()) {
+  if (!obj || typeof obj !== 'object' || depth > 5 || seen.has(obj)) return null;
+  seen.add(obj);
+  if (obj.crimesByType && (obj.currentUserStats || obj.currentLevel !== undefined || obj.crimesByType)) return obj;
+  if (obj.DB && obj.DB.crimesByType) return obj.DB;
+  // Redux store on a Provider
+  if (typeof obj.getState === 'function' && typeof obj.dispatch === 'function') {
+    try { const r = findCrimeDB(obj.getState(), depth + 1, seen); if (r) return r; } catch { /* ignore */ }
+  }
+  const keys = Array.isArray(obj) ? [] : Object.keys(obj);
+  for (const k of keys) {
+    if (k === 'children' || k === '_owner' || k.startsWith('__react') || k === 'return' || k === 'sibling' || k === 'alternate') continue;
+    let v; try { v = obj[k]; } catch { continue; }
+    if (v && typeof v === 'object') { const r = findCrimeDB(v, depth + 1, seen); if (r) return r; }
+  }
+  return null;
+}
+
+// Walk up from a crime row (or the app root) through React's tree, checking props and state.
+function readRenderedCrimeDB(doc = document) {
+  const starts = [
+    doc.querySelector('[class*="crimeOptionSection__"]'),
+    doc.querySelector('.crimes-app'),
+    doc.querySelector('[class*="virtualList__"]'),
+    doc.getElementById('react-root'),
+  ].filter(Boolean);
+  for (const start of starts) {
+    const key = reactKeyOf(start);
+    if (!key) continue;
+    let fiber = start[key];
+    if (fiber && fiber.current) fiber = fiber.current;          // container root
+    for (let i = 0; fiber && i < 60; i++, fiber = fiber.return) {
+      const found = findCrimeDB(fiber.memoizedProps) || findCrimeDB(fiber.memoizedState);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// Called from the UI loop on crime pages. Once per crime per page load.
+const ReactBackup = {
+  done: {},
+  tryRead(typeID, onChange) {
+    if (!typeID || this.done[typeID]) return;
+    const data = Store.load();
+    const st = data.state[typeID];
+    if (st && st.seenAt >= Diag.pageLoadedAt) { this.done[typeID] = true; return; } // fetch hook already got it
+    let db = null;
+    try { db = readRenderedCrimeDB(); } catch (e) { Diag.lastError = 'page read: ' + e.message; }
+    if (!db) return;
+    this.done[typeID] = true;
+    Diag.fromPage += 1;
+    handleResponse('/page.php?sid=crimesData&step=crimesList', JSON.stringify({ typeID: String(typeID) }), { DB: db });
+    onChange();
+  },
+};
+
 // ---------- crimes: one analyzer per crime ----------
 // Each returns { actionable, note, options: [{ label, detail, best }] }.
 // Cross-crime ranking uses measured $/N (crimeRate); analyzers pick the best option inside a crime.
 
-// Cracking payout ranges from the Torn wiki (Cracking page), keyed by target title.
-const CRACK_PAYOUT = {
-  'colleague': [10e3, 30e3], 'ex-boyfriend': [10e3, 30e3], 'ex-girlfriend': [10e3, 30e3],
-  'ex-husband': [10e3, 30e3], 'ex-wife': [10e3, 30e3], 'online adversary': [10e3, 30e3],
-  'romantic interest': [10e3, 30e3], 'friend': [10e3, 25e3], 'neighbor': [10e3, 25e3], 'neighbour': [10e3, 25e3],
-  'informant': [30e3, 50e3], 'juror': [30e3, 50e3], 'doctor': [35e3, 140e3], 'judge': [40e3, 99.6e3],
-  'hacker': [50e3, 199.8e3], 'police officer': [40e3, 90e3], 'government official': [70e3, 130e3],
-  'politician': [60e3, 119.9e3], 'pornography network': [80.5e3, 149.8e3], 'campus network': [60e3, 180e3],
-  'health service': [80.1e3, 150e3], 'games developer': [60.1e3, 149e3], 'rival corporation': [80.1e3, 250e3],
-  'police department': [100.3e3, 250e3], 'criminal syndicate': [100.3e3, 348.5e3], 'government': [150.2e3, 499.4e3],
-  'internet service provider': [175e3, 294.9e3], 'armed forces': [400e3, 749.8e3], 'intelligence agency': [402.6e3, 997.6e3],
-};
 
 // Emforus: dead-body jobs are the top Disposal earners. Used only to order jobs until your own log has values.
 const DISPOSAL_PRIORITY = ['Dead Body', 'Body Part', 'Murder Weapon', 'Firearm', 'Vehicle'];
@@ -295,7 +420,7 @@ function sfcByClock(title, now) {
 }
 
 const Analyzers = {
-  9(db, data) { // Disposal
+  9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
     const opts = jobs.map(job => {
       const methods = (job.methods || []).filter(m => m.available !== false && !m.locked).map(m => {
@@ -308,8 +433,9 @@ const Analyzers = {
       methods.sort((a, b) => (b.learned ? 1 : 0) - (a.learned ? 1 : 0) || b.score - a.score);
       const best = methods[0];
       const pr = DISPOSAL_PRIORITY.indexOf(job.title);
+      const b = blend(ctx.rate, best.learned);
       return {
-        key: job.title, method: best.m.title,
+        key: job.title, method: best.m.title, perN: b.perN, nerve: best.m.nerve, units: 1, src: b.src,
         short: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}%` + (best.learned ? ` · ${fmt.perN(best.learned.perNerve)}` : ''),
         label: job.title + (job.expiresSoon ? ' (expires soon)' : ''),
         detail: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}% success (${best.sr.suc}/${best.sr.att})` +
@@ -335,11 +461,10 @@ const Analyzers = {
       const units = chars.reduce((s, c) => s + ((c.char && c.char !== '*') ? 0 : (c.status || 0)), 0);
       const revealed = chars.some(c => c.char && c.char !== '*');
       const nerve = Math.round(Math.ceil(units / power) * 7 / brute + 5);
-      const range = CRACK_PAYOUT[String(t.title).toLowerCase()];
-      const mid = range ? (range[0] + range[1]) / 2 : null;
-      const perN = mid ? mid / nerve : null;
+      const range = REF.cracking[String(t.title).toLowerCase()];
+      const perN = range ? mid(range) / nerve : null;
       return {
-        service: t.service,
+        key: t.title, service: t.service, perN, nerve, units: 1, src: 'wiki est',
         short: `${perN ? 'est ' + fmt.perN(perN) : 'payout unknown'} · ~${nerve}N`,
         label: `${t.title} — ${t.service}${revealed ? ' (in progress)' : ''}`,
         detail: `${chars.length} chars · ~${nerve}N left · ${range ? `${fmt.money(range[0])}–${fmt.money(range[1])}` : 'payout unknown'}` +
@@ -357,7 +482,7 @@ const Analyzers = {
     };
   },
 
-  4(db, data) { // Shoplifting
+  4(db, data, ctx) { // Shoplifting
     const now = Date.now();
     const stores = Array.isArray(db.crimesByType) ? db.crimesByType : [];
     const opts = stores.map(s => {
@@ -370,8 +495,10 @@ const Analyzers = {
       });
       const learned = actionValue(data, 4, s.crimeID);
       const downTxt = down.map(e => `${e.title} down (seen ${fmt.ago(data.outages[`${s.title}|${e.title}`])})`).join(', ');
+      const b = blend(ctx.rate, learned);
+      const allDown = fx.length > 0 && down.length === fx.length;
       return {
-        key: s.title,
+        key: s.title, perN: (allDown || learned) ? b.perN : null, nerve: s.nerve || 4, units: Infinity, src: b.src,
         short: (down.length === fx.length && fx.length ? 'all security down' : `${down.length}/${fx.length} down`) + (learned ? ` · ${fmt.perN(learned.perNerve)}` : ''),
         label: s.title,
         detail: `${down.length}/${fx.length} security down${downTxt ? ': ' + downTxt : ''} · notoriety ${info.notoriety || 0}%` +
@@ -426,25 +553,47 @@ const Analyzers = {
     return { actionable: true, note: d.length ? `Lowest district reputation: ${Math.min(...d)} stars` : '', options: [] };
   },
 
-  5() { return { actionable: true, note: 'Targets are live; check the page for good ones', options: [] }; },
+  5(db, data) { // Pickpocketing: marks are live for seconds, so this only labels the page
+    const marks = Array.isArray(db.crimesByType) ? db.crimesByType : [];
+    const opts = marks.map(m => {
+      const range = REF.pickpocketing[String(m.title).toLowerCase()];
+      const sr = successRate(db.stats, m.crimeID);
+      const b = blend(range ? mid(range) * sr.p / (m.nerve || 5) : null, actionValue(data, 5, m.crimeID));
+      const status = m.crimeInfo && m.crimeInfo.status ? m.crimeInfo.status.title : '';
+      const learnedPP = actionValue(data, 5, m.crimeID);
+      return { key: m.title, perN: b.perN, nerve: m.nerve || 5, units: 0, src: b.src, noPick: !learnedPP,
+        short: b.perN !== null ? `${fmt.perN(b.perN)} · ${Math.round(sr.p * 100)}%` : `${Math.round(sr.p * 100)}%`,
+        label: m.title, detail: `${status} · ${range ? `${fmt.money(range[0])}–${fmt.money(range[1])}` : 'cash unknown'} · ${b.src}`,
+        sort: b.perN || 0 };
+    }).sort((a, b) => b.sort - a.sort);
+    if (opts.length && opts[0].perN) opts[0].best = true;
+    return { actionable: true, note: 'Marks are live for seconds; the page labels show which are worth 5N', options: opts };
+  },
 
   6(db) { // Card Skimming
     const s = db.stats || {};
     return { actionable: (s.cardsRecoverable || 0) > 0, note: `${s.skimmersActive ?? '?'} skimmers active · ${s.cardsRecoverable ?? 0} card details recoverable`, options: [] };
   },
 
-  7(db) { // Burglary
+  7(db, data) { // Burglary
     const props = ((db.crimesByType && db.crimesByType.properties) || []).filter(p => !(p.expire && p.expire * 1000 < Date.now()));
     const soon = props.filter(p => p.expiresSoon).length;
-    const opts = props.map(p => ({
-      key: p.title,
+    const opts = props.map(p => {
+      const range = REF.burglary[String(p.title).toLowerCase()];
+      const sr = successRate(db.stats, p.burgleCrimeID);
+      const nerve = (p.burgleNerve || 6) + (p.confidence >= 40 ? 0 : 2 * (p.caseNerve || 2));
+      const b = blend(range ? mid(range) * sr.p / nerve : null, actionValue(data, 7, p.burgleCrimeID));
+      // Burglary pays cash only some of the time, so the wiki range alone can't drive the top pick.
+      const learnedB = actionValue(data, 7, p.burgleCrimeID);
+      return {
+      key: p.title, perN: b.perN, nerve, units: 1, src: b.src + (range ? ' + items' : ''), noPick: !learnedB,
       short: `${p.confidence}% confidence` + (p.recommendedItem && !p.recommendedItem.owned ? ` · missing ${p.recommendedItem.title}` : '') + (p.expiresSoon ? ' · expiring' : ''),
       label: p.title,
       detail: `confidence ${p.confidence}% · ${p.safetyStatus}` +
         (p.recommendedItem ? ` · needs ${p.recommendedItem.title}${p.recommendedItem.owned ? ' (owned)' : ' (MISSING)'}` : '') +
         ` · expires in ${fmt.dur(p.expire - Date.now() / 1000)}`,
-      sort: (p.safetyStatus === 'safe' ? 1000 : 0) + p.confidence,
-    })).sort((a, b) => b.sort - a.sort);
+      sort: (b.perN || 0) + (p.safetyStatus === 'safe' ? 1e6 : 0) + p.confidence,
+    }; }).sort((a, b) => b.sort - a.sort);
     if (opts.length) opts[0].best = true;
     return { actionable: props.length > 0, note: `${props.length} targets scouted${soon ? ` · ${soon} expiring soon` : ''}`, options: opts };
   },
@@ -458,8 +607,24 @@ const Analyzers = {
 
   11(db) { // Forgery
     const c = db.crimesByType || {};
+    const st = db.stats || {};
+    const att = Object.values(st.crimesByIDAttempts || {}).reduce((a, b) => a + b, 0);
+    const suc = Object.values(st.crimesByIDAttemptsSucc || {}).reduce((a, b) => a + b, 0);
+    const pStep = att ? (suc + 4) / (att + 5) : 0.9;
+    const opts = (c.beginProject || []).filter(bp => bp.available !== false).map(bp => {
+      const name = String(bp.title).replace(/^Begin /, '').replace(/ project$/, '');
+      const price = REF.forgery[name.toLowerCase()];
+      const steps = (bp.steps || []).length || 4;
+      const nerve = steps * 5;
+      const perN = price ? price * Math.pow(pStep, steps) / nerve : null;
+      return { key: name, perN, nerve, units: Infinity, src: 'before materials', noPick: true,
+        short: perN ? `est ${fmt.perN(perN)} · ${nerve}N` : 'price unknown',
+        label: name, detail: `${steps} steps · ${nerve}N · ${price ? fmt.money(price) + ' at the Print Store, before materials' : 'price unknown'}`,
+        sort: perN || 0 };
+    }).sort((a, b) => b.sort - a.sort);
+    if (opts.length && opts[0].perN) opts[0].best = true;
     const n = (c.projects || []).length;
-    return { actionable: n > 0, note: `${n} projects active · pays in items (needs item prices)`, options: [] };
+    return { actionable: opts.some(o => o.perN), note: `${n} projects active${opts[0] && opts[0].perN ? ` · best: ${opts[0].label}` : ''}`, options: opts };
   },
 
   12(db) { // Scamming
@@ -485,6 +650,8 @@ const Analyzers = {
 };
 
 // Build the ranked list across all crimes.
+const pickableCount = opts => opts.filter(o => !o.noPick).length;
+
 function rankAll(data) {
   const rows = Object.keys(CRIMES).map(Number).map(typeID => {
     const st = data.state[typeID];
@@ -496,28 +663,100 @@ function rankAll(data) {
       // A new TCT day: yesterday's list is gone and new ones have spawned.
       a = { actionable: true, note: `New ${DAILY[typeID]} since 00:00 TCT — open to see them`, options: [] };
     } else if (st && Analyzers[typeID]) {
-      try { a = Analyzers[typeID](st.db, data, { now, fresh }); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
+      try { a = Analyzers[typeID](st.db, data, { now, fresh, rate: rate.rate }); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
       if (fresh.stale) a.note = `${a.note} (as of ${fmt.ago(st.seenAt)})`;
     }
     if (DAILY[typeID] && st && !fresh.newDay && !a.actionable) {
       a.note = `${a.note} · next ${DAILY[typeID]} in ${fmt.dur((lastTctMidnight(now) + 86400000 - now) / 1000)}`;
     }
-    return { typeID, name: CRIMES[typeID], rate: rate.rate, source: rate.source, seenAt: st && st.seenAt,
-      stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, ...a };
+    // "now": the best option's estimate where the crime has per-option numbers (and isn't live-only), else your crime rate.
+    const plannable = (a.options || []).filter(o => o.perN !== null && o.perN !== undefined && o.units !== 0);
+    // An estimate that leaves out known costs (Forgery materials) is shown but can't be the top pick.
+    const noPick = plannable.length > 0 && pickableCount(plannable) === 0;
+    const pickable = plannable.filter(o => !o.noPick);
+    const bestOpt = (pickable.length ? pickable : plannable).sort((x, y) => y.perN - x.perN)[0];
+    const nowRate = a.actionable && bestOpt && !fresh.newDay ? bestOpt.perN : rate.rate;
+    const nowSrc = a.actionable && bestOpt && !fresh.newDay ? bestOpt.src : rate.source;
+    return { typeID, name: CRIMES[typeID], rate: nowRate, crimeRate: rate.rate, source: nowSrc, seenAt: st && st.seenAt,
+      stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, noPick, ...a };
   });
   rows.sort((x, y) => (y.actionable - x.actionable) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
-  const top = rows.find(r => r.actionable && r.rate !== null && r.rate > 0) || null;
+  const top = rows.find(r => r.actionable && !r.noPick && r.rate !== null && r.rate > 0) || null;
   rows.forEach(r => {
     if (!top || r === top) return;
     if (!r.actionable) r.why = 'nothing to do right now';
     else if (r.rate === null) r.why = r.source;
     else if (r.rate <= 0) r.why = 'has lost money overall';
+    else if (r.noPick) r.why = r.typeID === 11 ? 'estimate leaves out material costs' : 'wiki estimate; needs a few of your own tries first';
     else {
       const x = top.rate / r.rate;
       r.why = x < 1.5 ? `${top.name} pays ${Math.round((x - 1) * 100)}% more per nerve` : `${top.name} pays ~${Math.round(x)}× more per nerve`;
     }
   });
   return { top, rows };
+}
+
+// ---------- plan: what to spend the nerve you have on ----------
+
+// Nerve per repeat for crimes ranked by your overall rate (no per-option numbers).
+const UNIT_NERVE = { 1: 2, 2: 5, 3: 3, 4: 4, 6: 6, 8: 2, 12: 8, 13: 20 };
+const NERVE_REGEN_MIN = 5; // 1 nerve every 5 minutes
+
+// Read "14/130" from the sidebar's nerve bar; falls back to the last nerve the crime data reported.
+function readNerve(doc = document) {
+  const candidates = [];
+  const bar = doc.getElementById('barNerve');
+  if (bar) candidates.push(bar);
+  doc.querySelectorAll('[class*="bar-name"]').forEach(n => { if (/nerve/i.test(n.textContent)) candidates.push(n.parentNode); });
+  for (const c of candidates) {
+    const v = c && (c.querySelector('[class*="bar-value"]') || c);
+    const m = v && v.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+    if (m) return { cur: Number(m[1]), max: Number(m[2]), from: 'sidebar' };
+  }
+  const u = Store.load().user;
+  return u ? { cur: u.nerve, max: null, from: 'crime data' } : null;
+}
+
+// Greedy: best $/N first, within what you can afford right now.
+function planNerve(rows, nerve) {
+  if (!nerve || nerve.cur <= 0) return { steps: [], left: nerve ? nerve.cur : 0 };
+  const cands = [];
+  rows.filter(r => r.actionable && !r.newDay && !r.noPick).forEach(r => {
+    const opts = (r.options || []).filter(o => o.perN > 0 && o.units !== 0 && o.nerve && !o.noPick);
+    if (opts.length) opts.forEach(o => cands.push({ crime: r.name, label: o.key || o.label, perN: o.perN, nerve: o.nerve, units: o.units }));
+    else if (r.crimeRate > 0 && UNIT_NERVE[r.typeID]) cands.push({ crime: r.name, label: null, perN: r.crimeRate, nerve: UNIT_NERVE[r.typeID], units: Infinity });
+  });
+  // Crimes with new jobs since midnight: worth a look first, size unknown.
+  const look = rows.filter(r => r.newDay).map(r => r.name);
+  cands.sort((a, b) => b.perN - a.perN);
+  let left = nerve.cur;
+  const steps = [];
+  for (const c of cands) {
+    if (left < c.nerve) continue;
+    const n = Math.min(c.units, Math.floor(left / c.nerve));
+    if (n <= 0) continue;
+    steps.push({ ...c, count: n });
+    left -= n * c.nerve;
+    if (left < 2) break;
+  }
+  return { steps, left, look };
+}
+
+function capWarning(nerve) {
+  if (!nerve || !nerve.max) return null;
+  const missing = nerve.max - nerve.cur;
+  if (missing <= 0) return 'Nerve is full: regen is going to waste';
+  const min = missing * NERVE_REGEN_MIN;
+  return min <= 60 ? `Nerve full in ~${min} min` : null;
+}
+
+function planText(plan, nerve) {
+  if (!nerve) return '';
+  const parts = plan.steps.slice(0, 4).map(s =>
+    `${s.crime}${s.label ? ': ' + s.label : ''}${s.count > 1 ? ' ×' + s.count : ''} (${s.count * s.nerve}N, ${fmt.perN(s.perN)})`);
+  let t = `With ${nerve.cur}N: ` + (parts.length ? parts.join(' → ') : 'nothing worth it yet');
+  if (plan.look && plan.look.length) t = `Open ${plan.look.join(', ')} first (new since 00:00 TCT) · ` + t;
+  return t;
 }
 
 // ---------- ui: small labels on Torn's own page, like Crime Profitability ----------
@@ -574,6 +813,15 @@ function rowTitle(row) {
   return norm(row.textContent).slice(0, 40);
 }
 
+function headerLine(text) {
+  const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
+  if (!header || !header.parentNode) return;
+  let line = document.getElementById('ca-line');
+  if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
+  if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
+  if (line.textContent !== text) line.textContent = text;
+}
+
 const UI = {
   mounted: false,
 
@@ -588,9 +836,10 @@ const UI = {
   render() {
     if (!this.mounted) return;
     try {
+      const here = currentCrime();
+      if (here) ReactBackup.tryRead(here, () => {});
       const data = Store.load();
       const ranking = rankAll(data);
-      const here = currentCrime();
       if (here) this.crimePage(here, ranking); else this.hub(ranking);
       Store.save();
     } catch (e) { console.warn('[CrimeAdvisor]', e); }
@@ -598,6 +847,10 @@ const UI = {
 
   // ---- Crime Hub: one badge per card ----
   hub({ top, rows }) {
+    const nerve = readNerve();
+    const plan = planNerve(rows, nerve);
+    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})` : 'Open the crimes you play once so the Advisor can read them';
+    headerLine([head, planText(plan, nerve), capWarning(nerve)].filter(Boolean).join(' · '));
     document.querySelectorAll('.crimes-hub-root a, .crimes-hub-crime').forEach(card => {
       const titleEl = card.querySelector('[class*="crimeTitle__"]');
       if (!titleEl) return;
@@ -618,21 +871,18 @@ const UI = {
     if (!r) return;
 
     // One line under the header: your $/N here, the best crime now, and this crime's status.
-    const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
-    if (header && header.parentNode) {
-      let line = document.getElementById('ca-line');
-      if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
-      if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
-      const parts = [`Your ${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
+    {
+      const parts = [`${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
       if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
       else if (top) parts.push('★ Best crime right now');
+      const cap = capWarning(readNerve());
+      if (cap) parts.push(cap);
       let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
       if (!r.seenAt) {
-        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data seen this page load: ${Diag.read}` +
-          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') +
-          ' — press F5 on this page so Torn reloads the crime data.';
+        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data read this page load: ${Diag.read}` +
+          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') + ' — press F5 so Torn reloads the crime data.';
       }
-      if (line.textContent !== text) line.textContent = text;
+      headerLine(text);
     }
 
     const optRows = Array.from(document.querySelectorAll('[class*="crimeOptionSection__"]'));

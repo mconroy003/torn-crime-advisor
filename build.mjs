@@ -14,6 +14,6 @@ const header = `// ==UserScript==
 // @grant        none
 ${raw ? `// @updateURL    ${raw}\n// @downloadURL  ${raw}\n` : ''}// ==/UserScript==
 `;
-const parts = ['core', 'data', 'crimes', 'ui', 'main'].map(f => readFileSync(`src/${f}.js`, 'utf8'));
+const parts = ['core', 'reference', 'data', 'react', 'crimes', 'plan', 'ui', 'main'].map(f => readFileSync(`src/${f}.js`, 'utf8'));
 writeFileSync('dist/crime-advisor.user.js', `${header}\n(function () {\n'use strict';\n${parts.join('\n')}\n})();\n`);
 console.log('built dist/crime-advisor.user.js', pkg.version, repo || '(no repo set)');

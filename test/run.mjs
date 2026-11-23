@@ -5,7 +5,7 @@ const mem = {};
 const ctx = { console, URL, Date, JSON, Math, Number, String, Object, Array,
   localStorage: { getItem: k => mem[k] ?? null, setItem: (k, v) => { mem[k] = String(v); }, removeItem: k => { delete mem[k]; } } };
 vm.createContext(ctx);
-for (const f of ['core', 'data', 'crimes']) vm.runInContext(readFileSync(`src/${f}.js`, 'utf8') + '\n;globalThis.__x=1', ctx);
+for (const f of ['core', 'reference', 'data', 'react', 'crimes', 'plan']) vm.runInContext(readFileSync(`src/${f}.js`, 'utf8') + '\n;globalThis.__x=1', ctx);
 const run = code => vm.runInContext(code, ctx);
 let fails = 0; const ok = (c, m) => { if (!c) { fails++; console.log('FAIL', m); } else console.log('ok  ', m); };
 
@@ -62,6 +62,19 @@ if (existsSync('test/fixtures/c2.json')) {
   ok(t.rows.find(r => r.typeID === 10).options.length === 0, 'old Cracking targets dropped after midnight');
   ok(sfc.options.some(o => o.detail.includes('clock')), 'Search for Cash uses clock estimates when old');
   ctx.Date = Date;
+}
+
+// Nerve plan with 130N
+if (existsSync('test/fixtures/c2.json')) {
+  ctx.__rows = run('rankAll(Store.load()).rows');
+  const plan = run('planNerve(__rows, {cur:130, max:130})');
+  console.log('\nPLAN 130N:', run('planText')(plan, { cur: 130 }));
+  ok(plan.steps.length > 0 && plan.left < 130, 'planner spends nerve');
+  ok(!plan.steps.some(s => s.crime === 'Forgery'), 'Forgery estimate excluded from the plan');
+  ok(run('capWarning({cur:120,max:130})') === 'Nerve full in ~50 min', 'cap warning within the hour');
+  const burg = run('rankAll(Store.load()).rows').find(r => r.typeID === 7);
+  ok(!/Could not read/.test(burg.note), 'Burglary reads');
+  console.log('  Burglary:', burg.note, '|', (burg.options[0] || {}).short);
 }
 
 require_write(); await new Promise(r => setTimeout(r, 50));

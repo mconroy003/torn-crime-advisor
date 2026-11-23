@@ -12,6 +12,15 @@ A read-only userscript for Torn Crimes 2.0. It tells you which crime to spend ne
 2. Open https://raw.githubusercontent.com/mconroy003/torn-crime-advisor/main/dist/crime-advisor.user.js and click Install. Tampermonkey checks that URL for updates.
 3. Open the Crimes page and visit each crime once. The panel in the bottom-right fills in.
 
+## How the numbers work
+
+- **Starting estimates (no spreadsheets):** public payout ranges from the Torn wiki × your own success rate for that option ÷ its nerve cost. Used for Cracking, Pickpocketing, Burglary and Forgery.
+- **Your results take over:** every attempt returns your new cash total, so each option moves toward what it actually paid you (half-way after 5 tries).
+- **Recent over lifetime:** each crime's rate uses your last 14 days, blended with lifetime until you've spent enough nerve recently.
+- **Shown but not picked:** estimates that leave out known costs or uncertain cash (Forgery materials, Burglary and Pickpocketing before you have your own tries) appear on the page but never become the top pick.
+- **Nerve plan:** the Hub line reads your nerve from the sidebar and lists what to spend it on, best $/N first, and warns when nerve will be full within the hour.
+- **Backup read:** if the page loaded its crime data before the script was listening, it reads the same data from the rendered page.
+
 ## Between visits
 
 The script can only read a crime while you have it open, so it fills the gaps itself:
