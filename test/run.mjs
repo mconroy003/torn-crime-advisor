@@ -44,4 +44,6 @@ ok(res.rows.length === 13, 'all 13 crimes ranked');
 ok(res.rows.find(r => r.typeID === 9).options.length > 0, 'disposal jobs found');
 ok(res.rows.find(r => r.typeID === 10).options.length > 0, 'cracking targets found');
 let Store_size; ok(JSON.stringify(Store_size = run('localStorage.getItem("crimeAdvisor.v1").length')) && Store_size < 2_000_000, `stored state size ${Store_size} bytes`);
+require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);
+function require_write() { import('node:fs').then(fs => fs.writeFileSync('/tmp/ca-state.json', mem['crimeAdvisor.v1'] || '{}')); }

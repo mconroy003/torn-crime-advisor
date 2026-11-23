@@ -33,6 +33,8 @@ const Analyzers = {
       const best = methods[0];
       const pr = DISPOSAL_PRIORITY.indexOf(job.title);
       return {
+        key: job.title, method: best.m.title,
+        short: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}%` + (best.learned ? ` · ${fmt.perN(best.learned.perNerve)}` : ''),
         label: job.title + (job.expiresSoon ? ' (expires soon)' : ''),
         detail: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}% success (${best.sr.suc}/${best.sr.att})` +
           (best.learned ? ` · ${fmt.perN(best.learned.perNerve)} from ${best.learned.n} tries` : ''),
@@ -61,6 +63,8 @@ const Analyzers = {
       const mid = range ? (range[0] + range[1]) / 2 : null;
       const perN = mid ? mid / nerve : null;
       return {
+        service: t.service,
+        short: `${perN ? 'est ' + fmt.perN(perN) : 'payout unknown'} · ~${nerve}N`,
         label: `${t.title} — ${t.service}${revealed ? ' (in progress)' : ''}`,
         detail: `${chars.length} chars · ~${nerve}N left · ${range ? `${fmt.money(range[0])}–${fmt.money(range[1])}` : 'payout unknown'}` +
           ` · est ${fmt.perN(perN)} · expires in ${fmt.dur(t.expire - Date.now() / 1000)}`,
@@ -91,6 +95,8 @@ const Analyzers = {
       const learned = actionValue(data, 4, s.crimeID);
       const downTxt = down.map(e => `${e.title} down (seen ${fmt.ago(data.outages[`${s.title}|${e.title}`])})`).join(', ');
       return {
+        key: s.title,
+        short: (down.length === fx.length && fx.length ? 'all security down' : `${down.length}/${fx.length} down`) + (learned ? ` · ${fmt.perN(learned.perNerve)}` : ''),
         label: s.title,
         detail: `${down.length}/${fx.length} security down${downTxt ? ': ' + downTxt : ''} · notoriety ${info.notoriety || 0}%` +
           (learned ? ` · ${fmt.perN(learned.perNerve)} from ${learned.n} tries` : ''),
@@ -110,7 +116,7 @@ const Analyzers = {
   1(db) { // Search for Cash
     const locs = (Array.isArray(db.crimesByType) ? db.crimesByType : []).map(c => {
       const a = c.additionalInfo || {};
-      return { label: c.title.replace('Search the ', ''), detail: `${a.barValue ?? '?'}% · ${a.title || ''}`, sort: a.barValue || 0 };
+      return { key: c.title, short: `${a.barValue ?? '?'}%`, label: c.title.replace('Search the ', ''), detail: `${a.barValue ?? '?'}% · ${a.title || ''}`, sort: a.barValue || 0 };
     }).sort((a, b) => b.sort - a.sort);
     if (locs.length) locs[0].best = true;
     return { actionable: true, note: locs.length ? `Best now: ${locs[0].label} (${locs[0].sort}%)` : '', options: locs };
@@ -148,6 +154,8 @@ const Analyzers = {
     const props = (db.crimesByType && db.crimesByType.properties) || [];
     const soon = props.filter(p => p.expiresSoon).length;
     const opts = props.map(p => ({
+      key: p.title,
+      short: `${p.confidence}% confidence` + (p.recommendedItem && !p.recommendedItem.owned ? ` · missing ${p.recommendedItem.title}` : '') + (p.expiresSoon ? ' · expiring' : ''),
       label: p.title,
       detail: `confidence ${p.confidence}% · ${p.safetyStatus}` +
         (p.recommendedItem ? ` · needs ${p.recommendedItem.title}${p.recommendedItem.owned ? ' (owned)' : ' (MISSING)'}` : '') +
