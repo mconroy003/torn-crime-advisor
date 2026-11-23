@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.1.0
+// @version      0.1.1
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -431,6 +431,11 @@ const CSS = `
 #ca-panel{position:fixed;right:12px;bottom:12px;width:350px;max-height:70vh;overflow:auto;z-index:99999;
   background:#1d1f21;color:#e6e6e6;font:12px/1.4 Arial,sans-serif;border:1px solid #444;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.4)}
 #ca-panel.ca-min{width:auto;max-height:none;overflow:visible}
+#ca-panel.ca-inline{position:relative;right:auto;bottom:auto;width:auto;max-height:none;margin:0 0 10px;box-shadow:none}
+#ca-panel.ca-inline .ca-body{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+#ca-panel.ca-inline .ca-col{min-width:0}
+@media (max-width:784px){#ca-panel.ca-inline .ca-body{grid-template-columns:1fr}}
+#ca-panel.ca-float{left:12px;right:auto}
 #ca-panel .ca-head{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#2a2d30;
   border-radius:8px 8px 0 0;cursor:pointer;position:sticky;top:0}
 #ca-panel .ca-title{font-weight:bold}
@@ -465,14 +470,31 @@ const UI = {
   el: null,
   minimized: localStorage.getItem('crimeAdvisor.min') === '1',
 
+  // Sit in the page, just above the crimes app (outside React's tree), so Torn's chat can't cover it.
+  // Falls back to a floating box in the bottom-left if that spot isn't there.
+  place() {
+    const anchor = document.getElementById('react-root');
+    if (anchor && anchor.parentNode) {
+      if (this.el.nextSibling !== anchor || this.el.parentNode !== anchor.parentNode) anchor.parentNode.insertBefore(this.el, anchor);
+      this.mode = 'inline';
+    } else if (!this.el.isConnected) {
+      document.body.appendChild(this.el);
+      this.mode = 'float';
+    }
+  },
+
   mount() {
     if (this.el || !document.body) return;
     const style = h('style'); style.textContent = CSS; document.head.appendChild(style);
     this.el = h('div'); this.el.id = 'ca-panel';
-    document.body.appendChild(this.el);
+    this.mode = 'float';
+    this.place();
     window.addEventListener('hashchange', () => this.render());
     this.render();
-    setInterval(() => this.render(), 60000); // refresh "x min ago" labels
+    // The crimes app loads after us; keep re-checking our spot for a while, then just refresh labels.
+    let tries = 0;
+    const t = setInterval(() => { const m = this.mode; this.place(); if (m !== this.mode) this.render(); if (++tries > 30) clearInterval(t); }, 1000);
+    setInterval(() => { this.place(); this.render(); }, 60000);
   },
 
   render() {
@@ -481,7 +503,7 @@ const UI = {
     const { top, rows } = rankAll(data);
     Store.save(); // analyzers may update outage timers
     const el = this.el;
-    el.className = this.minimized ? 'ca-min' : '';
+    el.className = [this.mode === 'inline' ? 'ca-inline' : 'ca-float', this.minimized ? 'ca-min' : ''].join(' ');
     el.textContent = '';
 
     const head = h('div', 'ca-head');
@@ -494,8 +516,12 @@ const UI = {
     });
     el.appendChild(head);
 
-    const body = h('div', 'ca-body');
-    el.appendChild(body);
+    const outer = h('div', 'ca-body');
+    el.appendChild(outer);
+    let body = h('div', 'ca-col');
+    outer.appendChild(body);
+    const right = h('div', 'ca-col');
+    outer.appendChild(right);
 
     // Top pick
     const box = h('div', 'ca-top');
@@ -525,7 +551,8 @@ const UI = {
       });
     }
 
-    // Full list
+    // Full list (right column when inline)
+    body = right;
     body.appendChild(h('h4', null, 'All crimes, best first'));
     rows.forEach(r => {
       const row = h('div', 'ca-row');
