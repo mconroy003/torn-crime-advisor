@@ -103,7 +103,12 @@ const UI = {
       const parts = [`Your ${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
       if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
       else if (top) parts.push('★ Best crime right now');
-      const text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
+      let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
+      if (!r.seenAt) {
+        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data seen this page load: ${Diag.read}` +
+          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') +
+          ' — press F5 on this page so Torn reloads the crime data.';
+      }
       if (line.textContent !== text) line.textContent = text;
     }
 

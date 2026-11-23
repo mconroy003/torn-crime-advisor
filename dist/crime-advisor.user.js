@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.2.0
+// @version      0.2.1
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -146,9 +146,16 @@ function recordSnapshot(data, typeID, stats, crimeID, now) {
   data.last[typeID] = snap;
 }
 
+const Diag = { hooked: false, seen: 0, read: 0, lastStep: '', lastError: '' };
+
 function handleResponse(url, body, json, now = Date.now()) {
-  if (!url || !String(url).includes('sid=crimesData') || !json || !json.DB) return false;
+  if (!url || !String(url).includes('sid=crimesData')) return false;
+  Diag.seen += 1;
+  if (!json || !json.DB) { Diag.lastError = 'response had no DB'; return false; }
   const { step, typeID, crimeID } = parseRequest(url, body);
+  Diag.lastStep = `${step}${typeID ? ' #' + typeID : ''}`;
+  if (typeID) Diag.read += 1;
+  console.log('[CrimeAdvisor] read', Diag.lastStep);
   const db = json.DB;
   const data = Store.load();
   if (db.user && typeof db.user.nerve === 'number') data.user = { nerve: db.user.nerve, at: now };
@@ -161,15 +168,33 @@ function handleResponse(url, body, json, now = Date.now()) {
   return true;
 }
 
+function bodyText(body) {
+  if (!body) return null;
+  if (typeof body === 'string') return body;
+  try {
+    if (body instanceof URLSearchParams) return body.toString();
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      const o = {}; body.forEach((v, k) => { if (typeof v === 'string') o[k] = v; }); return JSON.stringify(o);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 function installHooks(win, onChange) {
+  Diag.hooked = true;
+  console.log('[CrimeAdvisor] listening for crime data');
   const origFetch = win.fetch;
   win.fetch = async function (resource, config) {
     const res = await origFetch.apply(this, arguments);
     try {
       const url = typeof resource === 'string' ? resource : resource && resource.url;
       if (url && String(url).includes('sid=crimesData')) {
-        const body = config && typeof config.body === 'string' ? config.body : null;
-        res.clone().json().then(j => { if (handleResponse(url, body, j)) onChange(); }).catch(() => {});
+        let body = bodyText(config && config.body);
+        const parse = b => res.clone().json().then(j => { if (handleResponse(url, b, j)) onChange(); })
+          .catch(e => { Diag.seen += 1; Diag.lastError = 'could not parse: ' + e.message; });
+        if (!body && resource && typeof resource !== 'string' && resource.clone) {
+          resource.clone().text().then(t => parse(t)).catch(() => parse(null));
+        } else parse(body);
       }
     } catch { /* never break the page */ }
     return res;
@@ -179,8 +204,8 @@ function installHooks(win, onChange) {
   P.send = function (body) {
     if (this._caUrl && String(this._caUrl).includes('sid=crimesData')) {
       this.addEventListener('load', () => {
-        try { if (handleResponse(String(this._caUrl), typeof body === 'string' ? body : null, JSON.parse(this.responseText))) onChange(); }
-        catch { /* not JSON */ }
+        try { if (handleResponse(String(this._caUrl), bodyText(body), JSON.parse(this.responseText))) onChange(); }
+        catch (e) { Diag.lastError = 'XHR: ' + e.message; }
       });
     }
     return send.apply(this, arguments);
@@ -538,7 +563,12 @@ const UI = {
       const parts = [`Your ${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
       if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
       else if (top) parts.push('★ Best crime right now');
-      const text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
+      let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
+      if (!r.seenAt) {
+        text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data seen this page load: ${Diag.read}` +
+          (Diag.lastError ? ` · last error: ${Diag.lastError}` : '') +
+          ' — press F5 on this page so Torn reloads the crime data.';
+      }
       if (line.textContent !== text) line.textContent = text;
     }
 
