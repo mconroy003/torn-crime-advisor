@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.2.2
+// @version      0.3.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -249,6 +249,51 @@ const CRACK_PAYOUT = {
 // Emforus: dead-body jobs are the top Disposal earners. Used only to order jobs until your own log has values.
 const DISPOSAL_PRIORITY = ['Dead Body', 'Body Part', 'Murder Weapon', 'Firearm', 'Vehicle'];
 
+// How long each crime's live state stays trustworthy without a fresh look (minutes).
+// Daily crimes (Disposal, Cracking, Arson) get new jobs at 00:00 TCT instead.
+const STALE_AFTER_MIN = { 1: 60, 2: 360, 3: 1440, 4: 15, 5: 1, 6: 360, 7: 1440, 8: 60, 11: 180, 12: 60 };
+const DAILY = { 9: 'jobs', 10: 'targets', 13: 'jobs' };
+
+function lastTctMidnight(now) { return Math.floor(now / 86400000) * 86400000; }
+
+function freshness(typeID, seenAt, now) {
+  if (!seenAt) return { known: false };
+  const ageMin = (now - seenAt) / 60000;
+  if (DAILY[typeID]) {
+    const newDay = seenAt < lastTctMidnight(now);
+    return { known: true, newDay, stale: newDay, ageMin };
+  }
+  const limit = STALE_AFTER_MIN[typeID];
+  return { known: true, newDay: false, stale: limit !== undefined && ageMin > limit, ageMin };
+}
+
+// Search for Cash by the clock (all TCT). Higher is better, 0-100. Used when the last look is over an hour old.
+function sfcByClock(title, now) {
+  const d = new Date(now);
+  const dow = (d.getUTCDay() + 6) % 7;            // Mon=0 … Sun=6
+  const hour = d.getUTCHours() + d.getUTCMinutes() / 60;
+  const weekHours = dow * 24 + hour;              // hours since Monday 00:00
+  const weekday = dow < 5;
+  const t = String(title).toLowerCase();
+  if (t.includes('trash')) {                       // collected Mon 06–18; fills up through the week
+    const since = (weekHours - 18 + 168) % 168;
+    return { pct: Math.round(Math.min(100, since / 150 * 100)), why: 'fills until Monday collection (06–18)' };
+  }
+  if (t.includes('junkyard')) {                    // crushing weekdays 09–16: best Monday morning, worst Friday evening
+    const crushed = Math.min(5, dow) * 7 + (weekday ? Math.max(0, Math.min(7, hour - 9)) : 0);
+    return { pct: Math.round(100 - crushed / 35 * 90), why: 'drops with each weekday crushing (09–16)' };
+  }
+  if (t.includes('cemetery')) {                    // groundskeepers weekdays 09–17
+    const on = weekday && hour >= 9 && hour < 17;
+    return { pct: on ? 25 : 75, why: on ? 'groundskeepers on now (weekdays 09–17)' : 'no groundskeepers right now' };
+  }
+  if (t.includes('fountain')) {                    // collected the 1st, 13–16
+    const dim = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    return { pct: Math.round((d.getUTCDate() - 1 + hour / 24) / dim * 100), why: 'fills until collection on the 1st' };
+  }
+  return null;                                     // Subway (players online) and Beach (tide) need a look
+}
+
 const Analyzers = {
   9(db, data) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
@@ -285,7 +330,7 @@ const Analyzers = {
     const brute = successRate(db.stats, 205).p;
     // Each brute-force attempt clears about "bruteforcePower" characters/layers (your stats: ~3 attempts per password).
     const power = Math.max(1, parseFloat(cbt.rig && cbt.rig.bruteforcePower) || 1);
-    const opts = (cbt.targets || []).filter(t => !t.isCracked).map(t => {
+    const opts = (cbt.targets || []).filter(t => !t.isCracked && !(t.expire && t.expire * 1000 < Date.now())).map(t => {
       const chars = t.password || [];
       const units = chars.reduce((s, c) => s + ((c.char && c.char !== '*') ? 0 : (c.status || 0)), 0);
       const revealed = chars.some(c => c.char && c.char !== '*');
@@ -344,13 +389,20 @@ const Analyzers = {
     };
   },
 
-  1(db) { // Search for Cash
+  1(db, data, ctx) { // Search for Cash
+    const old = ctx.fresh.ageMin > 60;
     const locs = (Array.isArray(db.crimesByType) ? db.crimesByType : []).map(c => {
       const a = c.additionalInfo || {};
-      return { key: c.title, short: `${a.barValue ?? '?'}%`, label: c.title.replace('Search the ', ''), detail: `${a.barValue ?? '?'}% · ${a.title || ''}`, sort: a.barValue || 0 };
+      const est = old ? sfcByClock(c.title, ctx.now) : null;
+      const pct = est ? est.pct : (a.barValue ?? null);
+      const tag = est ? `~${pct}% (clock)` : old ? `${pct ?? '?'}% (${fmt.ago(ctx.fresh.ageMin ? Date.now() - ctx.fresh.ageMin * 60000 : null)})` : `${pct ?? '?'}%`;
+      // An old reading the clock can't update (Subway, Beach) counts for less.
+      const sortPct = (pct || 0) * (old && !est ? 0.8 : 1);
+      return { key: c.title, short: tag, label: c.title.replace('Search the ', ''),
+        detail: est ? `${tag} · ${est.why}` : `${tag} · ${a.title || ''}`, sort: sortPct, pct };
     }).sort((a, b) => b.sort - a.sort);
     if (locs.length) locs[0].best = true;
-    return { actionable: true, note: locs.length ? `Best now: ${locs[0].label} (${locs[0].sort}%)` : '', options: locs };
+    return { actionable: true, note: locs.length ? `Best now: ${locs[0].label} (${locs[0].short})` : '', options: locs };
   },
 
   2(db) { // Bootlegging
@@ -382,7 +434,7 @@ const Analyzers = {
   },
 
   7(db) { // Burglary
-    const props = (db.crimesByType && db.crimesByType.properties) || [];
+    const props = ((db.crimesByType && db.crimesByType.properties) || []).filter(p => !(p.expire && p.expire * 1000 < Date.now()));
     const soon = props.filter(p => p.expiresSoon).length;
     const opts = props.map(p => ({
       key: p.title,
@@ -437,11 +489,21 @@ function rankAll(data) {
   const rows = Object.keys(CRIMES).map(Number).map(typeID => {
     const st = data.state[typeID];
     const rate = crimeRate(data, typeID);
+    const now = Date.now();
+    const fresh = freshness(typeID, st && st.seenAt, now);
     let a = { actionable: false, note: 'Open this crime once so the Advisor can read it', options: [] };
-    if (st && Analyzers[typeID]) {
-      try { a = Analyzers[typeID](st.db, data); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
+    if (st && fresh.newDay) {
+      // A new TCT day: yesterday's list is gone and new ones have spawned.
+      a = { actionable: true, note: `New ${DAILY[typeID]} since 00:00 TCT — open to see them`, options: [] };
+    } else if (st && Analyzers[typeID]) {
+      try { a = Analyzers[typeID](st.db, data, { now, fresh }); } catch (e) { a = { actionable: false, note: 'Could not read this crime: ' + e.message, options: [] }; }
+      if (fresh.stale) a.note = `${a.note} (as of ${fmt.ago(st.seenAt)})`;
     }
-    return { typeID, name: CRIMES[typeID], rate: rate.rate, source: rate.source, seenAt: st && st.seenAt, ...a };
+    if (DAILY[typeID] && st && !fresh.newDay && !a.actionable) {
+      a.note = `${a.note} · next ${DAILY[typeID]} in ${fmt.dur((lastTctMidnight(now) + 86400000 - now) / 1000)}`;
+    }
+    return { typeID, name: CRIMES[typeID], rate: rate.rate, source: rate.source, seenAt: st && st.seenAt,
+      stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, ...a };
   });
   rows.sort((x, y) => (y.actionable - x.actionable) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
   const top = rows.find(r => r.actionable && r.rate !== null && r.rate > 0) || null;
@@ -544,6 +606,8 @@ const UI = {
       const isTop = !!top && r.typeID === top.typeID;
       const txt = r.rate !== null ? `${isTop ? '★ ' : ''}${fmt.perN(r.rate)}` : null;
       badge(card, 'rate', txt, isTop ? 'ca-good' : (r.rate !== null && r.rate < 0 ? 'ca-bad' : ''), 'tr');
+      const status = r.newDay ? `new ${DAILY[r.typeID]}` : r.stale ? `checked ${fmt.ago(r.seenAt)}` : (!r.seenAt ? 'open once' : null);
+      badge(card, 'status', status, r.newDay ? 'ca-good' : '', 'tl');
       card.classList.toggle('ca-pick', isTop);
     });
   },

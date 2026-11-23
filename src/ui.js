@@ -84,6 +84,8 @@ const UI = {
       const isTop = !!top && r.typeID === top.typeID;
       const txt = r.rate !== null ? `${isTop ? '★ ' : ''}${fmt.perN(r.rate)}` : null;
       badge(card, 'rate', txt, isTop ? 'ca-good' : (r.rate !== null && r.rate < 0 ? 'ca-bad' : ''), 'tr');
+      const status = r.newDay ? `new ${DAILY[r.typeID]}` : r.stale ? `checked ${fmt.ago(r.seenAt)}` : (!r.seenAt ? 'open once' : null);
+      badge(card, 'status', status, r.newDay ? 'ca-good' : '', 'tl');
       card.classList.toggle('ca-pick', isTop);
     });
   },

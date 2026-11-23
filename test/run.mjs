@@ -44,6 +44,25 @@ ok(res.rows.length === 13, 'all 13 crimes ranked');
 ok(res.rows.find(r => r.typeID === 9).options.length > 0, 'disposal jobs found');
 ok(res.rows.find(r => r.typeID === 10).options.length > 0, 'cracking targets found');
 let Store_size; ok(JSON.stringify(Store_size = run('localStorage.getItem("crimeAdvisor.v1").length')) && Store_size < 2_000_000, `stored state size ${Store_size} bytes`);
+
+
+function require_write() { import('node:fs').then(fs => fs.writeFileSync('/tmp/ca-state.json', mem['crimeAdvisor.v1'] || '{}')); }
+
+// Time travel: Tuesday 08:30 TCT (after midnight reset)
+if (existsSync('test/fixtures/c2.json')) {
+  const realNow = Date.now;
+  const fake = Date.parse('2026-11-24T08:30:00Z');
+  class FakeDate extends Date { constructor(...a) { super(...(a.length ? a : [fake])); } static now() { return fake; } }
+  ctx.Date = FakeDate;
+  const t = run('rankAll(Store.load())');
+  console.log('\n--- Tue 08:30 TCT ---\nTOP PICK:', t.top && t.top.name);
+  for (const r of t.rows) console.log(`  ${r.actionable ? '•' : ' '} ${r.name.padEnd(16)} ${r.newDay ? '[new]' : r.stale ? '[stale]' : '      '} ${r.note}`);
+  const sfc = t.rows.find(r => r.typeID === 1); sfc.options.forEach(o => console.log('    SFC', o.label, o.detail));
+  ok(t.rows.find(r => r.typeID === 9).newDay, 'Disposal flagged as new day after midnight');
+  ok(t.rows.find(r => r.typeID === 10).options.length === 0, 'old Cracking targets dropped after midnight');
+  ok(sfc.options.some(o => o.detail.includes('clock')), 'Search for Cash uses clock estimates when old');
+  ctx.Date = Date;
+}
+
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);
-function require_write() { import('node:fs').then(fs => fs.writeFileSync('/tmp/ca-state.json', mem['crimeAdvisor.v1'] || '{}')); }
