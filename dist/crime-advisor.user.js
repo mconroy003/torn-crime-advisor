@@ -7,6 +7,8 @@
 // @match        https://www.torn.com/page.php?sid=crimes*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/mconroy003/torn-crime-advisor/main/dist/crime-advisor.user.js
+// @downloadURL  https://raw.githubusercontent.com/mconroy003/torn-crime-advisor/main/dist/crime-advisor.user.js
 // ==/UserScript==
 
 (function () {

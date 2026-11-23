@@ -9,7 +9,7 @@ A read-only userscript for Torn Crimes 2.0. It tells you which crime to spend ne
 ## Install
 
 1. Install Tampermonkey (desktop) or open TornPDA's userscript settings.
-2. Install `dist/crime-advisor.user.js` from this repo.
+2. Open https://raw.githubusercontent.com/mconroy003/torn-crime-advisor/main/dist/crime-advisor.user.js and click Install. Tampermonkey checks that URL for updates.
 3. Open the Crimes page and visit each crime once. The panel in the bottom-right fills in.
 
 ## What v0.1 covers
