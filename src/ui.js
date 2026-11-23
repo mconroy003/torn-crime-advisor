@@ -4,12 +4,15 @@
 // Built with textContent only; re-applied every second because React re-renders rows.
 
 const CSS = `
-.ca-badge{display:inline-block;margin:0 6px;padding:1px 6px;border-radius:9px;font-size:11px;font-weight:bold;
-  line-height:16px;background:rgba(127,127,127,.18);color:inherit;white-space:nowrap;vertical-align:middle}
-.ca-badge.ca-good{background:#3c8d4f;color:#fff}
-.ca-badge.ca-bad{background:rgba(224,122,122,.25)}
-.ca-pick{outline:2px solid #3c8d4f !important;outline-offset:-2px;border-radius:5px}
-.ca-line{padding:6px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
+.ca-host{position:relative !important}
+.ca-badge{position:absolute;z-index:5;pointer-events:none;padding:0 5px;border-radius:8px;font:bold 10px/15px Arial,sans-serif;
+  background:rgba(20,20,20,.78);color:#fff;white-space:nowrap;max-width:60%;overflow:hidden;text-overflow:ellipsis}
+.ca-badge.ca-good{background:#3c8d4f}
+.ca-badge.ca-bad{background:#a94442}
+.ca-badge.ca-tl{top:3px;left:3px}
+.ca-badge.ca-tr{top:3px;right:3px}
+.ca-pick{outline:2px solid #3c8d4f !important;outline-offset:-2px}
+.ca-line{padding:5px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
 `;
 
 function h(tag, cls, text) {
@@ -26,16 +29,15 @@ function currentCrime() {
   return null; // Crime Hub
 }
 
-// Set or create one badge inside `host`, keyed so we update instead of re-adding.
-function badge(host, key, text, cls, before) {
+// One floating tag per host, positioned over a corner so Torn's layout never shifts.
+// `corner` is 'tl' or 'tr'. Updated in place instead of re-added.
+function badge(host, key, text, cls, corner = 'tl') {
   if (!host) return;
-  let b = Array.from(host.children).find(c => c.classList.contains('ca-badge') && c.dataset.ca === key);
+  let b = Array.from(host.children).find(c => c.classList && c.classList.contains('ca-badge') && c.dataset.ca === key);
   if (!text) { if (b) b.remove(); return; }
-  if (!b) {
-    b = h('span', 'ca-badge'); b.dataset.ca = key;
-    if (before && before.parentNode === host) host.insertBefore(b, before); else host.appendChild(b);
-  }
-  const c = 'ca-badge' + (cls ? ' ' + cls : '');
+  if (!host.classList.contains('ca-host')) host.classList.add('ca-host');
+  if (!b) { b = h('span', 'ca-badge'); b.dataset.ca = key; host.appendChild(b); }
+  const c = `ca-badge ca-${corner}` + (cls ? ' ' + cls : '');
   if (b.className !== c) b.className = c;
   if (b.textContent !== text) b.textContent = text;
 }
@@ -79,13 +81,10 @@ const UI = {
       if (!titleEl) return;
       const r = rows.find(x => norm(x.name) === norm(titleEl.textContent));
       if (!r) return;
-      const host = card.querySelector('[class*="titleBar__"]') || titleEl.parentNode;
       const isTop = !!top && r.typeID === top.typeID;
-      const txt = r.rate !== null ? `${isTop ? '★ ' : ''}${fmt.perN(r.rate)}` : (r.seenAt ? r.source : 'open once');
-      badge(host, 'rate', txt, isTop ? 'ca-good' : (r.rate !== null && r.rate < 0 ? 'ca-bad' : ''), host.firstChild);
+      const txt = r.rate !== null ? `${isTop ? '★ ' : ''}${fmt.perN(r.rate)}` : null;
+      badge(card, 'rate', txt, isTop ? 'ca-good' : (r.rate !== null && r.rate < 0 ? 'ca-bad' : ''), 'tr');
       card.classList.toggle('ca-pick', isTop);
-      const tip = [r.note, r.why].filter(Boolean).join(' · ');
-      if (card.title !== tip) card.title = tip;
     });
   },
 
@@ -122,8 +121,7 @@ const UI = {
       const t = rowTitle(row);
       const o = r.options.find(x => t.startsWith(norm(x.key)));
       if (!o) { badge(row, 'opt', null); return; }
-      badge(row, 'opt', (o.best ? '★ ' : '') + o.short, o.best ? 'ca-good' : '', row.childNodes[1] || null);
-      if (row.title !== o.detail) row.title = o.detail;
+      badge(row, 'opt', (o.best ? '★ ' : '') + o.short, o.best ? 'ca-good' : '');
     });
   },
 
@@ -136,8 +134,7 @@ const UI = {
         const isBest = !!o && norm(btn.getAttribute('aria-label')).includes(norm(o.method));
         btn.classList.toggle('ca-pick', isBest);
       });
-      badge(row, 'opt', o ? (o.best ? '★ ' : '') + o.short : null, o && o.best ? 'ca-good' : '', row.childNodes[1] || null);
-      if (o && row.title !== o.detail) row.title = o.detail;
+      badge(row, 'opt', o ? (o.best ? '★ ' : '') + o.short : null, o && o.best ? 'ca-good' : '');
     });
   },
 
@@ -147,7 +144,6 @@ const UI = {
       const svc = row.querySelector('[class*="service__"]');
       const o = svc && r.options.find(x => norm(x.service) === norm(svc.textContent));
       badge(row, 'opt', o ? (o.best ? '★ ' : '') + o.short : null, o && o.best ? 'ca-good' : '');
-      if (o && row.title !== o.detail) row.title = o.detail;
     });
   },
 };
