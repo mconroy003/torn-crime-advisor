@@ -7,6 +7,9 @@ const ctx = { console, URL, Date, JSON, Math, Number, String, Object, Array,
 vm.createContext(ctx);
 for (const f of ['core', 'reference', 'data', 'react', 'crimes', 'plan']) vm.runInContext(readFileSync(`src/${f}.js`, 'utf8') + '\n;globalThis.__x=1', ctx);
 const run = code => vm.runInContext(code, ctx);
+// Pin the clock for checks that depend on the day of the capture.
+function atTime(iso) { const t = Date.parse(iso); class D extends Date { constructor(...a) { super(...(a.length ? a : [t])); } static now() { return t; } } ctx.Date = D; }
+
 let fails = 0; const ok = (c, m) => { if (!c) { fails++; console.log('FAIL', m); } else console.log('ok  ', m); };
 
 // Unit checks
@@ -33,6 +36,7 @@ for (const file of ['c2.json', 'c3.json']) {
     }
   }
 }
+atTime('2026-11-23T21:00:00Z');
 const res = run('rankAll(Store.load())');
 console.log('\nTOP PICK:', res.top && `${res.top.name} ${run('fmt.perN')(res.top.rate)} — ${res.top.note}`);
 for (const r of res.rows) console.log(`  ${r.actionable ? '•' : ' '} ${r.name.padEnd(16)} ${String(r.rate === null ? r.source : Math.round(r.rate)).padStart(10)}  ${r.note}${r.why ? ' | ' + r.why : ''}`);
@@ -66,6 +70,7 @@ if (existsSync('test/fixtures/c2.json')) {
 
 // Nerve plan with 130N
 if (existsSync('test/fixtures/c2.json')) {
+  atTime('2026-11-23T21:00:00Z');
   ctx.__rows = run('rankAll(Store.load()).rows');
   const plan = run('planNerve(__rows, {cur:130, max:130})');
   console.log('\nPLAN 130N:', run('planText')(plan, { cur: 130 }));

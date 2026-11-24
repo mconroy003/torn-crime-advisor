@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.4.0
+// @version      0.5.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -163,14 +163,9 @@ function trimDB(db) {
     crimesByType: cbt,
     generalInfo: db.generalInfo || null,
     dirtyBomb: db.dirtyBomb || null,
-    stats: db.currentUserStats ? {
-      moneyFoundTotal: db.currentUserStats.moneyFoundTotal,
-      nerveUsed: db.currentUserStats.nerveUsed,
-      crimesByIDAttempts: db.currentUserStats.crimesByIDAttempts,
-      crimesByIDAttemptsSucc: db.currentUserStats.crimesByIDAttemptsSucc,
-      cardsRecoverable: db.currentUserStats.cardsRecoverable,
-      skimmersActive: db.currentUserStats.skimmersActive,
-    } : null,
+    // Every number in your stats, plus per-action attempts and successes.
+    stats: db.currentUserStats ? Object.fromEntries(Object.entries(db.currentUserStats).filter(([k, v]) =>
+      typeof v === 'number' || k === 'crimesByIDAttempts' || k === 'crimesByIDAttemptsSucc')) : null,
   };
 }
 
@@ -446,7 +441,7 @@ const Analyzers = {
     if (opts.length) opts[0].best = true;
     return {
       actionable: opts.length > 0,
-      note: opts.length ? `${opts.length} jobs open · start with ${opts[0].label}` : 'No jobs left today; new ones spawn at 00:00 TCT',
+      note: opts.length ? `Next: ${opts[0].label} → ${opts[0].method} · ${opts.length} jobs open` : 'No jobs left today; new ones spawn at 00:00 TCT',
       options: opts,
     };
   },
@@ -477,7 +472,7 @@ const Analyzers = {
     return {
       actionable: opts.length > 0 && !(heat >= 95),
       note: heat >= 95 ? `Rig is hot (${heat}%); let it cool ~${Math.ceil(heat - 90)} min` :
-        opts.length ? `${opts.length} targets · next: ${opts[0].label}` : 'No targets left; new ones at 00:00 TCT',
+        opts.length ? `Next: ${opts[0].label}${/in progress/.test(opts[0].label) ? ' (finish it first)' : ''} · ${opts.length} targets` : 'No targets left; new ones at 00:00 TCT',
       options: opts,
     };
   },
@@ -511,7 +506,7 @@ const Analyzers = {
     const open = opts.filter(o => o.allDown).map(o => o.label);
     return {
       actionable: true,
-      note: open.length ? `All security down at ${open.join(', ')}` : 'No store has all security down',
+      note: open.length ? `Next: ${open[0]} (all security down)` : 'Skip for now: no store has all its security down',
       options: opts,
     };
   },
@@ -532,8 +527,9 @@ const Analyzers = {
     return { actionable: true, note: locs.length ? `Best now: ${locs[0].label} (${locs[0].short})` : '', options: locs };
   },
 
-  2(db) { // Bootlegging
+  2(db) { // Bootlegging: copy DVDs → sell (street, 5N) or let the online store sell them → collect (1N)
     const gi = db.generalInfo || {};
+    const st = db.stats || {};
     const subs = Array.isArray(db.crimesByType) ? db.crimesByType : [];
     const store = subs.find(c => c.title === 'Online Store');
     const copy = subs.find(c => c.title === 'Copy DVDs');
@@ -541,16 +537,21 @@ const Analyzers = {
     const empty = Object.values(gi.CDs || {}).filter(n => !n).length;
     const toCollect = store && store.additionalInfo ? store.additionalInfo.moneyToCollect : 0;
     const blanks = copy && copy.additionalInfo ? copy.additionalInfo.blankCDs : null;
-    const notes = [];
-    if (toCollect > 0) notes.push(`Collect ${fmt.money(toCollect)} from the store (1N)`);
-    if (store && store.additionalInfo && store.additionalInfo.enabled && stock === 0) notes.push(`Store is on but has no stock${blanks !== null ? ` (${blanks} blank DVDs)` : ''}`);
-    else if (empty) notes.push(`${empty} of 8 genres out of stock`);
-    return { actionable: toCollect > 0 || (stock === 0 && blanks > 0), note: notes.join(' · ') || `${stock} DVDs in stock`, options: [] };
+    const perDvd = st.CDsSoldTotal ? (st.moneyMadeTotal || st.moneyFoundTotal) / st.CDsSoldTotal : null;
+    const steps = [];
+    if (toCollect > 0) steps.push({ action: `Collect ${fmt.money(toCollect)} from the online store (1N)`, perN: toCollect, nerve: 1, units: 1 });
+    const storeOn = store && store.additionalInfo && store.additionalInfo.enabled;
+    if (storeOn && (stock === 0 || empty) && blanks) steps.push({ action: `Copy DVDs to restock${empty ? ` ${empty} empty genre${empty > 1 ? 's' : ''}` : ''} (${blanks} blanks on hand)`, perN: null, deferred: true, why: `the store sells them for you, ~${fmt.money(perDvd)} each` });
+    const next = steps[0];
+    return {
+      actionable: !!next,
+      note: next ? `Next: ${next.action}${next.why ? ' — ' + next.why : ''}` : `${stock} DVDs in stock; the store is selling`,
+      steps, stepRate: next ? next.perN : null, options: [],
+    };
   },
-
   3(db) { // Graffiti
     const d = (Array.isArray(db.crimesByType) ? db.crimesByType : []).map(c => (c.additionalInfo || {}).reputation || 0);
-    return { actionable: true, note: d.length ? `Lowest district reputation: ${Math.min(...d)} stars` : '', options: [] };
+    return { actionable: true, note: d.length ? `Low earner: tag only to keep reputation up (lowest district ${Math.min(...d)} stars)` : '', options: [] };
   },
 
   5(db, data) { // Pickpocketing: marks are live for seconds, so this only labels the page
@@ -570,11 +571,30 @@ const Analyzers = {
     return { actionable: true, note: 'Marks are live for seconds; the page labels show which are worth 5N', options: opts };
   },
 
-  6(db) { // Card Skimming
-    const s = db.stats || {};
-    return { actionable: (s.cardsRecoverable || 0) > 0, note: `${s.skimmersActive ?? '?'} skimmers active · ${s.cardsRecoverable ?? 0} card details recoverable`, options: [] };
+  6(db) { // Card Skimming: install → let cards build → recover (4N) → sell in a batch (6N)
+    const st = db.stats || {};
+    const c = db.crimesByType || {};
+    const subs = c.subCrimes || [];
+    const perCard = st.cardDetailsSold ? (st.moneyMadeTotal || st.moneyFoundTotal) / st.cardDetailsSold : 215;
+    // Your typical haul per skimmer when recovered, and how often skimmers are lost.
+    const avgHaul = st.skimmersRecovered ? st.cardDetailsRecovered / st.skimmersRecovered : 40;
+    const lossRate = st.skimmersInstalled ? (st.skimmersLost || 0) / st.skimmersInstalled : 0.3;
+    const ripe = subs.filter(s => s.crimeInfo && s.crimeInfo.cards >= avgHaul);
+    const cardsHeld = (c.sellCards && c.sellCards.additionalInfo && c.sellCards.additionalInfo.collectedCards) || 0;
+    const steps = [];
+    if (cardsHeld > 0) steps.push({ action: `Sell ${cardsHeld} card details (6N)`, perN: cardsHeld * perCard / 6, nerve: 6, units: 1, why: `~${fmt.money(perCard)} each` });
+    if (ripe.length) steps.push({ action: `Recover ${ripe.length} skimmer${ripe.length > 1 ? 's' : ''} with ${Math.round(avgHaul)}+ cards (4N each)`, perN: avgHaul * perCard / 4, nerve: 4, units: ripe.length, why: 'they hold your usual haul; waiting longer risks losing them' });
+    const active = st.skimmersActive || subs.length;
+    const installRate = avgHaul * perCard * (1 - lossRate) / (6 + 4 + 6 / Math.max(1, avgHaul / 10));
+    if (active < 20) steps.push({ action: `Install ${20 - active} more skimmer${20 - active > 1 ? 's' : ''} (6N each)`, perN: installRate, deferred: true, nerve: 6, units: 20 - active, why: `pays out over days; ${Math.round(lossRate * 100)}% of your skimmers get lost` });
+    const most = subs.reduce((m, s) => Math.max(m, (s.crimeInfo && s.crimeInfo.cards) || 0), 0);
+    const next = steps[0];
+    return {
+      actionable: !!next,
+      note: next ? `Next: ${next.action} — ${next.why}` : `Let them build: ${active} skimmers, fullest has ${Math.round(most)} cards (you usually recover at ~${Math.round(avgHaul)})`,
+      steps, stepRate: next ? next.perN : null, options: [],
+    };
   },
-
   7(db, data) { // Burglary
     const props = ((db.crimesByType && db.crimesByType.properties) || []).filter(p => !(p.expire && p.expire * 1000 < Date.now()));
     const soon = props.filter(p => p.expiresSoon).length;
@@ -595,16 +615,28 @@ const Analyzers = {
       sort: (b.perN || 0) + (p.safetyStatus === 'safe' ? 1e6 : 0) + p.confidence,
     }; }).sort((a, b) => b.sort - a.sort);
     if (opts.length) opts[0].best = true;
-    return { actionable: props.length > 0, note: `${props.length} targets scouted${soon ? ` · ${soon} expiring soon` : ''}`, options: opts };
+    const ready = props.filter(p => p.safetyStatus === 'safe' || p.confidence >= 40);
+    const next = ready.length ? `Burgle ${ready[0].title} (${ready[0].confidence}% confidence)`
+      : props.length < 3 ? 'Scout for more targets (3N)'
+      : `Case ${opts[0].key} to raise its confidence (2N)`;
+    return { actionable: props.length > 0, note: `Next: ${next} · ${props.length} targets${soon ? `, ${soon} expiring soon` : ''}`, options: opts };
   },
 
-  8(db) { // Hustling
+  8(db) { // Hustling: collect from accomplices first; the games themselves lose money at your level
     const c = db.crimesByType || {};
+    const st = db.stats || {};
     const sh = (c.shill && c.shill.additionalInfo && c.shill.additionalInfo.moneyToCollect) || 0;
     const pp = (c.pickpocket && c.pickpocket.additionalInfo && c.pickpocket.additionalInfo.moneyToCollect) || 0;
-    return { actionable: true, note: sh + pp > 0 ? `Collect ${fmt.money(sh + pp)} from accomplices (2N each)` : 'Nothing to collect from accomplices', options: [] };
+    const steps = [];
+    if (sh) steps.push({ action: `Collect ${fmt.money(sh)} from your shill (2N)`, perN: sh / 2, nerve: 2, units: 1 });
+    if (pp) steps.push({ action: `Collect ${fmt.money(pp)} from your pickpocket (2N)`, perN: pp / 2, nerve: 2, units: 1 });
+    const net = (st.totalMoneyWon || 0) - (st.totalMoneyLost || 0);
+    return {
+      actionable: steps.length > 0,
+      note: steps.length ? `Next: ${steps[0].action}` : `Nothing to collect · your games are ${fmt.money(net)} overall, so skip them for money`,
+      steps, stepRate: steps.length ? steps[0].perN : null, options: [],
+    };
   },
-
   11(db) { // Forgery
     const c = db.crimesByType || {};
     const st = db.stats || {};
@@ -627,24 +659,69 @@ const Analyzers = {
     return { actionable: opts.some(o => o.perN), note: `${n} projects active${opts[0] && opts[0].perN ? ` · best: ${opts[0].label}` : ''}`, options: opts };
   },
 
-  12(db) { // Scamming
+  12(db) { // Scamming: farm → spam wave → reply to targets → capitalize
     const c = db.crimesByType || {};
-    const t = (c.targets || []).length;
+    const st = db.stats || {};
+    const targets = c.targets || [];
+    const scammed = (st.targetsScammedSucc || 0) + (st.targetsScammedFail || 0);
+    // Your own averages: cash per target worked, replies per target, targets per spam wave.
+    const ids = st.crimesByIDAttempts || {};
+    const replies = Object.entries(ids).filter(([k]) => +k >= 292 && +k <= 312 && +k % 2 === 0).reduce((a, [, v]) => a + v, 0);
+    const waves = Object.entries(ids).filter(([k]) => +k >= 291 && +k <= 311 && +k % 2 === 1).reduce((a, [, v]) => a + v, 0);
+    const perTarget = scammed ? (st.moneyAwarded || st.moneyFoundTotal || 0) / scammed : null;
+    const nervePerTarget = scammed ? replies * 3 / scammed : 21;
+    const targetsPerWave = waves ? scammed / waves : 2;
+    const workRate = perTarget ? perTarget / nervePerTarget : null;
+    const waveRate = perTarget ? targetsPerWave * perTarget / (8 + targetsPerWave * nervePerTarget) : null;
+    // Spam type: the highest-paying one that isn't worn out (red arrow = "depreciation").
+    const tiers = ['Investment', 'Romance', 'Advance-fee', 'Job', 'Tax', 'Vacation', 'Tech support', 'Charity', 'Family', 'Prize', 'Delivery'];
+    const methods = (c.methods || []).filter(m => m.available !== false && !(m.requirements && m.requirements.minCrimeLevel && m.requirements.minCrimeLevel.available === false));
+    const rank = m => { const i = tiers.findIndex(t => m.title.includes(t)); return i < 0 ? 99 : i; };
+    const fresh = methods.filter(m => !m.depreciation).sort((a, b) => rank(a) - rank(b));
+    const worn = methods.filter(m => m.depreciation).map(m => m.title.replace('Spam : ', '').replace(' scam', ''));
+    const spam = fresh[0] || null;
+    const farming = (c.farming && c.farming.currentOngoing) || [];
+    const farmTxt = farming.length ? farming.map(f => `${f.type} ${f.currentValue.toLocaleString('en-US')}`).join(', ') : 'no scraper or phisher running';
+    const steps = [];
+    if (targets.length) steps.push({ action: `Reply to your ${targets.length} target${targets.length > 1 ? 's' : ''} (3N per reply)`, perN: workRate, nerve: 3, units: Math.round(targets.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
+    if (c.awaitingResponses) steps.push({ action: 'Wait: responses are still coming in from your last wave', perN: null, wait: true });
+    else if (spam) steps.push({ action: `Send ${/^[AEIOU]/.test(spam.title.replace('Spam : ', '')) ? 'an' : 'a'} ${spam.title.replace('Spam : ', '')} wave (8N) if you have emails, else farm (8N)`, perN: waveRate, deferred: true, nerve: 8, units: 1,
+      why: `pays once replies arrive: ~${targetsPerWave.toFixed(1)} targets per wave, ~${Math.round(8 + targetsPerWave * nervePerTarget)}N in total${worn.length ? ` · worn out: ${worn.join(', ')}` : ''}` });
+    if (!farming.length) steps.push({ action: 'Restart a scraper or phisher (Email Farming, 8N)', perN: null, why: 'emails feed every wave' });
+    const next = steps[0];
     return {
-      actionable: true,
-      note: t ? `${t} targets need replies${c.awaitingResponses ? ' · awaiting responses' : ''}`
-        : `No targets: launch a spam wave (8N) · ${(c.farmedEmails || 0).toLocaleString('en-US')} emails`,
-      options: [],
+      actionable: !!next && !next.wait,
+      note: next ? `Next: ${next.action}${next.why ? ' — ' + next.why : ''}` : 'Nothing to do',
+      steps, stepRate: next && !next.wait ? next.perN : null,
+      options: [], detail: `Farming: ${farmTxt}`,
     };
   },
-
-  13(db) { // Arson
-    const jobs = (db.crimesByType && db.crimesByType.targets) || [];
-    const collect = jobs.filter(j => (j.availableActions || []).some(a => /collect/i.test(a.title))).length;
+  13(db) { // Arson: inquire (free) → make entry → place → ignite → (stoke/dampen) → collect
+    const c = db.crimesByType || {};
+    const st = db.stats || {};
+    const jobs = c.targets || [];
+    const have = Object.fromEntries((c.availableItems || []).map(i => [i.itemID, i.total]));
+    const perJob = st.rewardsCollected ? st.moneyFoundTotal / st.rewardsCollected : null;
+    const nervePerJob = st.rewardsCollected ? st.nerveUsed / st.rewardsCollected : 23;
+    const rate = perJob ? perJob / nervePerJob : null;
+    const act = j => (j.availableActions || [])[0] || {};
+    const needs = j => (j.icons || []).filter(i => /^B2$/.test(i.type) && Array.isArray(i.value));
+    const missing = j => needs(j).some(i => !i.value.some(id => (have[id] || 0) > 0));
+    const collect = jobs.filter(j => (j.availableActions || []).some(a => /collect/i.test(a.title)));
+    const started = jobs.filter(j => !collect.includes(j) && act(j).title && !/inquire/i.test(act(j).title));
+    const fresh = jobs.filter(j => /inquire/i.test(act(j).title || ''));
+    const steps = [];
+    if (collect.length) steps.push({ action: `Collect ${collect.length} finished job${collect.length > 1 ? 's' : ''} (2N each, can't fail)`, perN: perJob ? perJob / 2 : null, nerve: 2, units: collect.length, why: `about ${fmt.money(perJob)} each` });
+    const ready = started.filter(j => !missing(j));
+    if (ready.length) steps.push({ action: `Continue ${ready[0].title} — ${act(ready[0]).title} (${act(ready[0]).nerve}N)${ready.length > 1 ? `, then ${ready.length - 1} more in progress` : ''}`, perN: rate, nerve: Math.round(nervePerJob), units: ready.length, why: `your average is ${fmt.money(perJob)} per job for ~${Math.round(nervePerJob)}N` });
+    if (fresh.length) steps.push({ action: `Inquire on ${fresh.length} new job${fresh.length > 1 ? 's' : ''} (free)`, perN: null, why: 'costs no nerve and shows what each job wants' });
+    const blocked = jobs.filter(missing).map(j => `${j.title} (needs ${needs(j)[0].title.replace(/^.*: /, '')})`);
+    const next = steps.find(s => s.perN !== null) || steps[0];
     return {
-      actionable: jobs.length > 0,
-      note: `${jobs.length} jobs${collect ? ` · ${collect} ready to Collect (2N, can't fail)` : ''}`,
-      options: [],
+      actionable: steps.length > 0,
+      note: next ? `Next: ${next.action}${next.why ? ' — ' + next.why : ''}` : 'No jobs',
+      steps, stepRate: next ? next.perN : null,
+      options: [], detail: blocked.length ? `Missing items for: ${blocked.slice(0, 3).join(', ')}` : '',
     };
   },
 };
@@ -675,12 +752,20 @@ function rankAll(data) {
     const noPick = plannable.length > 0 && pickableCount(plannable) === 0;
     const pickable = plannable.filter(o => !o.noPick);
     const bestOpt = (pickable.length ? pickable : plannable).sort((x, y) => y.perN - x.perN)[0];
-    const nowRate = a.actionable && bestOpt && !fresh.newDay ? bestOpt.perN : rate.rate;
-    const nowSrc = a.actionable && bestOpt && !fresh.newDay ? bestOpt.src : rate.source;
+    let nowRate = a.actionable && bestOpt && !fresh.newDay ? bestOpt.perN : rate.rate;
+    let nowSrc = a.actionable && bestOpt && !fresh.newDay ? bestOpt.src : rate.source;
+    if (a.steps && !fresh.newDay) {
+      // Multi-step crimes: rank by what the next step is worth, not the crime's lifetime average.
+      const s0 = a.steps.find(s => !s.wait);
+      if (s0 && s0.perN !== null && s0.perN !== undefined) { nowRate = s0.perN; nowSrc = s0.deferred ? 'next step, pays later' : 'next step'; }
+      else if (s0) { nowSrc = 'next step has no direct payout'; }
+    }
     return { typeID, name: CRIMES[typeID], rate: nowRate, crimeRate: rate.rate, source: nowSrc, seenAt: st && st.seenAt,
       stale: !!fresh.stale && !fresh.newDay, newDay: !!fresh.newDay, noPick, ...a };
   });
-  rows.sort((x, y) => (y.actionable - x.actionable) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
+  // Things you can act on first, then estimates that can't be the top pick, then the rest; best $/N first within each.
+  const tier = r => (r.actionable ? (r.noPick ? 1 : 2) : 0);
+  rows.sort((x, y) => (tier(y) - tier(x)) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
   const top = rows.find(r => r.actionable && !r.noPick && r.rate !== null && r.rate > 0) || null;
   rows.forEach(r => {
     if (!top || r === top) return;
@@ -722,6 +807,12 @@ function planNerve(rows, nerve) {
   if (!nerve || nerve.cur <= 0) return { steps: [], left: nerve ? nerve.cur : 0 };
   const cands = [];
   rows.filter(r => r.actionable && !r.newDay && !r.noPick).forEach(r => {
+    if (r.steps) {
+      // Multi-step crimes: only the steps that can be done now, each as many times as it really can be.
+      r.steps.filter(st => !st.wait && st.perN > 0 && st.nerve).forEach(st =>
+        cands.push({ crime: r.name, label: st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
+      return;
+    }
     const opts = (r.options || []).filter(o => o.perN > 0 && o.units !== 0 && o.nerve && !o.noPick);
     if (opts.length) opts.forEach(o => cands.push({ crime: r.name, label: o.key || o.label, perN: o.perN, nerve: o.nerve, units: o.units }));
     else if (r.crimeRate > 0 && UNIT_NERVE[r.typeID]) cands.push({ crime: r.name, label: null, perN: r.crimeRate, nerve: UNIT_NERVE[r.typeID], units: Infinity });
@@ -729,6 +820,9 @@ function planNerve(rows, nerve) {
   // Crimes with new jobs since midnight: worth a look first, size unknown.
   const look = rows.filter(r => r.newDay).map(r => r.name);
   cands.sort((a, b) => b.perN - a.perN);
+  // Don't pad the plan with crimes worth under a quarter of the best one.
+  const floor = cands.length ? cands[0].perN / 4 : 0;
+  for (let i = cands.length - 1; i >= 0; i--) if (cands[i].perN < floor) cands.splice(i, 1);
   let left = nerve.cur;
   const steps = [];
   for (const c of cands) {

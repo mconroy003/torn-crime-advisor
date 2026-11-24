@@ -19,14 +19,9 @@ function trimDB(db) {
     crimesByType: cbt,
     generalInfo: db.generalInfo || null,
     dirtyBomb: db.dirtyBomb || null,
-    stats: db.currentUserStats ? {
-      moneyFoundTotal: db.currentUserStats.moneyFoundTotal,
-      nerveUsed: db.currentUserStats.nerveUsed,
-      crimesByIDAttempts: db.currentUserStats.crimesByIDAttempts,
-      crimesByIDAttemptsSucc: db.currentUserStats.crimesByIDAttemptsSucc,
-      cardsRecoverable: db.currentUserStats.cardsRecoverable,
-      skimmersActive: db.currentUserStats.skimmersActive,
-    } : null,
+    // Every number in your stats, plus per-action attempts and successes.
+    stats: db.currentUserStats ? Object.fromEntries(Object.entries(db.currentUserStats).filter(([k, v]) =>
+      typeof v === 'number' || k === 'crimesByIDAttempts' || k === 'crimesByIDAttemptsSucc')) : null,
   };
 }
 

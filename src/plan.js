@@ -24,6 +24,12 @@ function planNerve(rows, nerve) {
   if (!nerve || nerve.cur <= 0) return { steps: [], left: nerve ? nerve.cur : 0 };
   const cands = [];
   rows.filter(r => r.actionable && !r.newDay && !r.noPick).forEach(r => {
+    if (r.steps) {
+      // Multi-step crimes: only the steps that can be done now, each as many times as it really can be.
+      r.steps.filter(st => !st.wait && st.perN > 0 && st.nerve).forEach(st =>
+        cands.push({ crime: r.name, label: st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
+      return;
+    }
     const opts = (r.options || []).filter(o => o.perN > 0 && o.units !== 0 && o.nerve && !o.noPick);
     if (opts.length) opts.forEach(o => cands.push({ crime: r.name, label: o.key || o.label, perN: o.perN, nerve: o.nerve, units: o.units }));
     else if (r.crimeRate > 0 && UNIT_NERVE[r.typeID]) cands.push({ crime: r.name, label: null, perN: r.crimeRate, nerve: UNIT_NERVE[r.typeID], units: Infinity });
@@ -31,6 +37,9 @@ function planNerve(rows, nerve) {
   // Crimes with new jobs since midnight: worth a look first, size unknown.
   const look = rows.filter(r => r.newDay).map(r => r.name);
   cands.sort((a, b) => b.perN - a.perN);
+  // Don't pad the plan with crimes worth under a quarter of the best one.
+  const floor = cands.length ? cands[0].perN / 4 : 0;
+  for (let i = cands.length - 1; i >= 0; i--) if (cands[i].perN < floor) cands.splice(i, 1);
   let left = nerve.cur;
   const steps = [];
   for (const c of cands) {
