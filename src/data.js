@@ -103,6 +103,19 @@ function handleResponse(url, body, json, now = Date.now()) {
   if (typeID && db.crimesByType) {
     const fresh = trimDB(db);
     const prev = data.state[typeID];
+    // Items used up by this action: compare item counts the crime page lists (e.g. Arson accelerants) before and after.
+    if (step === 'attempt' && prev && prev.db && prev.db.crimesByType && Array.isArray(fresh.crimesByType && fresh.crimesByType.availableItems)) {
+      const before = Object.fromEntries((prev.db.crimesByType.availableItems || []).map(i => [i.itemID, i.total]));
+      const used = data.used = data.used || {};
+      const u = used[typeID] = used[typeID] || { items: {}, nerve: 0, actions: 0 };
+      for (const it of fresh.crimesByType.availableItems) {
+        const d = (before[it.itemID] ?? it.total) - it.total;
+        if (d > 0 && d < 50) u.items[it.itemID] = (u.items[it.itemID] || 0) + d;
+      }
+      const lastSnap = data.last[typeID];
+      const dN = db.currentUserStats && lastSnap ? db.currentUserStats.nerveUsed - lastSnap.nerve : 0;
+      if (dN > 0 && dN <= 60) { u.nerve += dN; u.actions += 1; }
+    }
     // A crime result can carry less than the full page (e.g. no rig section after a crack attempt).
     // Merge it into what we already have instead of replacing it, so missing parts keep their last value.
     if (step !== 'crimesList' && prev && prev.db && isPlainObj(prev.db.crimesByType) && isPlainObj(fresh.crimesByType)) {

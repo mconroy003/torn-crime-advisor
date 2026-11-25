@@ -5,7 +5,7 @@ const mem = {};
 const ctx = { console, URL, Date, JSON, Math, Number, String, Object, Array,
   localStorage: { getItem: k => mem[k] ?? null, setItem: (k, v) => { mem[k] = String(v); }, removeItem: k => { delete mem[k]; } } };
 vm.createContext(ctx);
-for (const f of ['core', 'reference', 'data', 'react', 'crimes', 'plan']) vm.runInContext(readFileSync(`src/${f}.js`, 'utf8') + '\n;globalThis.__x=1', ctx);
+for (const f of ['core', 'reference', 'prices', 'data', 'react', 'crimes', 'plan']) vm.runInContext(readFileSync(`src/${f}.js`, 'utf8') + '\n;globalThis.__x=1', ctx);
 const run = code => vm.runInContext(code, ctx);
 // Pin the clock for checks that depend on the day of the capture.
 function atTime(iso) { const t = Date.parse(iso); class D extends Date { constructor(...a) { super(...(a.length ? a : [t])); } static now() { return t; } } ctx.Date = D; }
@@ -152,6 +152,28 @@ if (existsSync('test/fixtures/c2.json')) {
   const skim = rows.find(r => r.typeID === 6);
   ok(/Bus Station or Post Office/.test(skim.note) && !/Install 0/.test(skim.note), 'Card Skimming suggests faster locations, no assumed slot cap');
 }
+
+// Item prices (mocked API v1 response)
+{
+  atTime('2026-11-23T21:00:00Z');
+  run(`Prices.ingest({ 1: { name: 'Cardstock', market_value: 9000 }, 2: { name: 'Bonded Latex', market_value: 20000 }, 3: { name: 'Glue', market_value: 5000 },
+    4: { name: 'Toner', market_value: 15000 }, 5: { name: 'Bond Paper', market_value: 8000 }, 6: { name: 'Adhesive Plastic', market_value: 12000 },
+    206: { name: 'Xanax', market_value: 830000 }, 172: { name: 'Gasoline', market_value: 3000 }, 1457: { name: 'Kerosene', market_value: 40000 },
+    7: { name: 'Passport', market_value: 610000 } }, Date.now())`);
+  const pp = run('rankAll(Store.load())').rows.find(r => r.typeID === 11).options.find(o => o.key === 'Passport');
+  console.log('  Passport priced:', pp.short, '|', pp.detail);
+  ok(/market prices/.test(pp.detail) && /item market/.test(pp.detail), 'Passport materials from prices; market sale beats the Print Store');
+  ok(Math.abs(pp.perN - (610000 - 74000) / pp.nerve) / pp.perN < 0.01, `net = (market sale − priced materials) ÷ nerve (${Math.round(pp.perN)})`);
+  const cyc = run(`Analyzers[5]({ crimesByType: [{ title: 'Cyclist', crimeID: 31, nerve: 5 }], stats: { crimesByIDAttempts: { 31: 100 }, crimesByIDAttemptsSucc: { 31: 90 } } }, Store.load(), {})`).options[0];
+  ok(cyc.perN > 10000 && cyc.perN < 13000, `cyclist valued from the Xanax price (${Math.round(cyc.perN)}/N)`);
+  // Arson: item counts drop on an attempt -> tracked as used
+  ctx.__s = (gas, ker, nerve) => ({ DB: { crimesByType: { targets: [], availableItems: [{ itemID: 172, total: gas }, { itemID: 1457, total: ker }] }, currentUserStats: { moneyFoundTotal: 77496500, nerveUsed: nerve, rewardsCollected: 1330 } } });
+  run(`handleResponse('/page.php?sid=crimesData&step=crimesList', '{"typeID":"13"}', __s(111, 23, 30873), Date.now())`);
+  for (let i = 0; i < 5; i++) run(`handleResponse('/page.php?sid=crimesData&step=attempt&typeID=13&crimeID=331', null, __s(${110 - i}, ${22 - i}, ${30878 + i * 5}), Date.now())`);
+  const ic = run('itemCostPerNerve(Store.load(), 13)');
+  ok(ic && ic.value === 5 * 3000 + 5 * 40000 && ic.nerve === 25, `Arson items used tracked: ${ic && fmt_(ic.value)} over ${ic && ic.nerve}N`);
+}
+function fmt_(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
 
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);

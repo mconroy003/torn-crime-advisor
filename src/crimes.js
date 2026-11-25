@@ -83,6 +83,16 @@ function scamTargetConcern(t) { return scamFlags(t).concern; }
 // Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
 const FORGERY_MATERIAL_DEFAULT = { Passport: 90000 };
 
+
+// Value of items a crime has used up (tracked from item counts before/after each action), per nerve, at current prices.
+function itemCostPerNerve(data, typeID) {
+  const u = data && data.used && data.used[typeID];
+  if (!u || u.nerve < 20 || !Prices.ready()) return null;
+  let value = 0;
+  for (const [id, n] of Object.entries(u.items)) value += (Prices.of(Number(id)) || 0) * n;
+  return { perN: value / u.nerve, value, nerve: u.nerve, actions: u.actions };
+}
+
 const Analyzers = {
   9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
@@ -232,7 +242,10 @@ const Analyzers = {
       const range = REF.pickpocketing[String(m.title).toLowerCase()];
       const sr = successRate(db.stats, m.crimeID);
       // Cyclists are worth far more than their cash: Emforus puts them at ~10k/N because ~1 in 15 drops Xanax.
-      const prior = /cyclist/i.test(m.title) ? 10000 : (range ? mid(range) * sr.p / (m.nerve || 5) : null);
+      const xan = Prices.of('Xanax');
+      const prior = /cyclist/i.test(m.title)
+        ? (xan ? ((range ? mid(range) : 0) * sr.p + xan / 15) / (m.nerve || 5) : 10000)   // ~1 in 15 cyclists drops Xanax (Emforus)
+        : (range ? mid(range) * sr.p / (m.nerve || 5) : null);
       const b = blend(prior, actionValue(data, 5, m.crimeID));
       const status = m.crimeInfo && m.crimeInfo.status ? m.crimeInfo.status.title : '';
       const learnedPP = actionValue(data, 5, m.crimeID);
@@ -338,18 +351,24 @@ const Analyzers = {
       const steps = (bp.steps || []).length || 4;
       const nerve = steps * 5 / pooled(bp);
       const setCost = settings.materials && settings.materials[name];
+      const priced = materialCostFromPrices(name);
+      const priceCost = priced && !priced.missing.length ? priced.total : undefined;
       const defCost = FORGERY_MATERIAL_DEFAULT[name];
-      const cost = setCost ?? defCost ?? null;
-      const gross = price ? price / nerve : null;
-      const perN = price && cost !== null ? (price - cost) / nerve : gross;
+      const cost = setCost ?? priceCost ?? defCost ?? null;
+      const market = Prices.of(name);
+      const sale = Math.max(price || 0, market || 0) || null;
+      const gross = sale ? sale / nerve : null;
+      const perN = sale && cost !== null ? (sale - cost) / nerve : gross;
       const costTxt = setCost !== undefined ? `materials ${fmt.money(setCost)} (yours)`
-        : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed)` : 'materials not set';
+        : priceCost !== undefined ? `materials ~${fmt.money(priceCost)} (market prices, 1 of each)`
+        : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed${priced && priced.missing.length ? `; no price for ${priced.missing.join(', ')}` : ''})` : 'materials not set';
+      const sellTip = market && price && market > price * 1.03 ? ` · sells for ${fmt.money(market)} on the item market (Print Store pays ${fmt.money(price)})` : '';
       return {
         key: name, perN, nerve: Math.round(nerve), units: Infinity, gross,
         src: cost !== null ? 'after materials' : 'before materials', noPick: cost === null,
         short: perN ? `${fmt.perN(perN)} · ${Math.round(nerve)}N` : 'price unknown',
         label: name,
-        detail: `${steps} steps · ~${Math.round(nerve)}N with your step success · ${price ? fmt.money(price) + ' at the Print Store' : 'price unknown'} · ${costTxt}`,
+        detail: `${steps} steps · ~${Math.round(nerve)}N with your step success · ${price ? fmt.money(price) + ' at the Print Store' : 'price unknown'} · ${costTxt}${sellTip}`,
         sort: perN || 0,
       };
     }).sort((a, b) => b.sort - a.sort);
@@ -409,14 +428,15 @@ const Analyzers = {
       options: [], detail: `Farming: ${farmTxt}`,
     };
   },
-  13(db) { // Arson: collect → light every hands-off job and let it burn → then work the jobs that need watching
+  13(db, data) { // Arson: collect → light every hands-off job and let it burn → then work the jobs that need watching
     const c = db.crimesByType || {};
     const st = db.stats || {};
     const jobs = c.targets || [];
     const have = Object.fromEntries((c.availableItems || []).map(i => [i.itemID, i.total]));
     const perJob = st.rewardsCollected ? st.moneyFoundTotal / st.rewardsCollected : null;
     const nervePerJob = st.rewardsCollected ? st.nerveUsed / st.rewardsCollected : 23;
-    const rate = perJob ? perJob / nervePerJob : null;
+    const itemCost = itemCostPerNerve(data, 13);
+    const rate = perJob ? perJob / nervePerJob - (itemCost ? itemCost.perN : 0) : null;
     const acts = j => (j.availableActions || []).map(a => a.title);
     const first = j => (j.availableActions || [])[0] || {};
     const needs = j => (j.icons || []).filter(i => i.type === 'B2' && Array.isArray(i.value));
@@ -443,7 +463,8 @@ const Analyzers = {
     if (handsOff.length) steps.push({ action: `Light ${handsOff[0].title}: ${nextAct(handsOff[0])}, through Ignite, then leave it to burn` +
         (handsOff.length > 1 ? ` · ${handsOff.length - 1} more to light the same way` : ''),
       perN: rate, nerve: 13, units: handsOff.length,
-      why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` });
+      why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` +
+        (itemCost ? ` · accelerants cost you ~${fmt.perN(itemCost.perN)} (tracked over ${itemCost.nerve}N)` : '') });
     if (watched.length) steps.push({ action: `Work ${watched[0].title} (${rule(watched[0])}): ${isBurning(watched[0]) ? 'watch it and dampen before it passes the limit' : nextAct(watched[0])}` +
         (watched.length > 1 ? ` · ${watched.length - 1} more like it` : ''),
       perN: rate, nerve: Math.round(nervePerJob), units: watched.length,

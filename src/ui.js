@@ -12,7 +12,9 @@ const CSS = `
 .ca-badge.ca-tl{top:3px;left:3px}
 .ca-badge.ca-tr{top:3px;right:3px}
 .ca-pick{outline:2px solid #3c8d4f !important;outline-offset:-2px}
-.ca-line{padding:5px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
+.ca-line{display:flex;justify-content:space-between;gap:10px;padding:5px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
+.ca-ctl{white-space:nowrap;opacity:.85}
+.ca-btn{background:none;border:0;padding:0;font:inherit;color:inherit;text-decoration:underline;cursor:pointer}
 `;
 
 function h(tag, cls, text) {
@@ -56,9 +58,28 @@ function headerLine(text) {
   const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
   if (!header || !header.parentNode) return;
   let line = document.getElementById('ca-line');
-  if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
+  if (!line) {
+    line = h('div', 'ca-line'); line.id = 'ca-line';
+    const msg = h('span'); msg.id = 'ca-msg'; line.appendChild(msg);
+    const ctl = h('span', 'ca-ctl');
+    const key = h('button', 'ca-btn', Prices.key() ? 'API key ✓' : 'Add API key'); key.type = 'button'; key.id = 'ca-key';
+    key.addEventListener('click', e => {
+      e.preventDefault();
+      const k = prompt('Torn API key for item prices (Public access is enough). Stored in this browser only; sent only to api.torn.com. Leave empty to remove.', Prices.key());
+      if (k === null) return;
+      Prices.setKey(k);
+      key.textContent = Prices.key() ? 'API key ✓' : 'Add API key';
+      Prices.refresh(pageFetch).then(() => UI.render());
+    });
+    const exp = h('button', 'ca-btn', 'Export data'); exp.type = 'button'; exp.id = 'ca-export';
+    exp.addEventListener('click', e => { e.preventDefault(); exportRaw(); });
+    ctl.appendChild(key); ctl.appendChild(document.createTextNode(' · ')); ctl.appendChild(exp);
+    line.appendChild(ctl);
+  }
   if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
-  if (line.textContent !== text) line.textContent = text;
+  const msg = document.getElementById('ca-msg');
+  const full = text + (Prices.error ? ` · prices: ${Prices.error}` : '');
+  if (msg.textContent !== full) msg.textContent = full;
 }
 
 const UI = {

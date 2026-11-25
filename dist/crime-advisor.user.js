@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.7.0
+// @version      0.8.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -142,6 +142,91 @@ function blend(priorPerN, learned) {
   return { perN: w * learned.perNerve + (1 - w) * priorPerN, src: `${Math.round(w * 100)}% yours, ${learned.n} tries` };
 }
 
+// ---------- prices: item market values from the Torn API (optional, needs your key) ----------
+// The key is kept in this browser only and sent only to api.torn.com. Prices are cached for 6 hours.
+
+const KEY_STORE = 'crimeAdvisor.apiKey';
+const PRICE_STORE = 'crimeAdvisor.prices';
+const PRICE_TTL = 6 * 3600 * 1000;
+
+const Prices = {
+  byId: {}, byName: {}, fetchedAt: 0, error: '', loading: false,
+
+  key() { try { return localStorage.getItem(KEY_STORE) || ''; } catch { return ''; } },
+  setKey(k) {
+    k = String(k || '').trim();
+    if (k) localStorage.setItem(KEY_STORE, k); else localStorage.removeItem(KEY_STORE);
+    localStorage.removeItem(PRICE_STORE);
+    this.byId = {}; this.byName = {}; this.fetchedAt = 0; this.error = '';
+  },
+
+  load() {
+    if (this.fetchedAt) return;
+    try {
+      const c = JSON.parse(localStorage.getItem(PRICE_STORE) || 'null');
+      if (c && c.at) this.ingest(c.items, c.at);
+    } catch { /* ignore */ }
+  },
+
+  // Accepts API v1 ({items:{id:{name, market_value}}}) or v2 ({items:[{id, name, value:{market_price}}]}).
+  ingest(items, at) {
+    const byId = {}, byName = {};
+    const list = Array.isArray(items) ? items : Object.entries(items || {}).map(([id, v]) => ({ id: Number(id), ...v }));
+    for (const it of list) {
+      const price = it.market_value ?? (it.value && (it.value.market_price ?? it.value.market_value)) ?? null;
+      const sell = it.sell_price ?? (it.value && it.value.sell_price) ?? null;
+      if (!it.name) continue;
+      const rec = { id: Number(it.id), name: it.name, price: price || null, sell: sell || null };
+      byId[rec.id] = rec; byName[it.name.toLowerCase()] = rec;
+    }
+    this.byId = byId; this.byName = byName; this.fetchedAt = at;
+  },
+
+  async refresh(fetchFn) {
+    const key = this.key();
+    this.load();
+    if (!key || this.loading || (this.fetchedAt && Date.now() - this.fetchedAt < PRICE_TTL)) return false;
+    this.loading = true;
+    try {
+      const res = await fetchFn(`https://api.torn.com/torn/?selections=items&key=${encodeURIComponent(key)}&comment=CrimeAdvisor`);
+      const j = await res.json();
+      if (j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
+      this.ingest(j.items, Date.now());
+      localStorage.setItem(PRICE_STORE, JSON.stringify({ at: this.fetchedAt, items: j.items }));
+      this.error = '';
+      return true;
+    } catch (e) {
+      this.error = e.message;
+      return false;
+    } finally { this.loading = false; }
+  },
+
+  ready() { this.load(); return Object.keys(this.byId).length > 0; },
+  of(idOrName) {
+    this.load();
+    const r = typeof idOrName === 'number' ? this.byId[idOrName] : this.byName[String(idOrName).toLowerCase()];
+    return r && r.price ? r.price : null;
+  },
+};
+
+// Consumables per Forgery project (Torn wiki, Forgery page). Quantity isn't listed there, so 1 per use is assumed.
+const FORGERY_CONSUMABLES = {
+  Passport: { 'Cardstock': 1, 'Bonded Latex': 1, 'Glue': 2, 'Toner': 1, 'Bond Paper': 1, 'Adhesive Plastic': 1 },
+  'Police Badge': { 'Brass Ingot': 1, 'Crushed Enamel': 1, 'Blowtorch': 1 },
+  'Bank Check': { 'Bank Statement': 1, 'Toner': 1, 'Bond Paper': 1, 'Inkwell': 1 },
+};
+
+function materialCostFromPrices(project) {
+  const list = FORGERY_CONSUMABLES[project];
+  if (!list || !Prices.ready()) return null;
+  let total = 0; const missing = [];
+  for (const [name, qty] of Object.entries(list)) {
+    const p = Prices.of(name);
+    if (p === null) missing.push(name); else total += p * qty;
+  }
+  return { total, missing };
+}
+
 // ---------- data: read the crime data the page already loads ----------
 // Read-only. Never sends requests to Torn, never clicks anything.
 
@@ -247,6 +332,19 @@ function handleResponse(url, body, json, now = Date.now()) {
   if (typeID && db.crimesByType) {
     const fresh = trimDB(db);
     const prev = data.state[typeID];
+    // Items used up by this action: compare item counts the crime page lists (e.g. Arson accelerants) before and after.
+    if (step === 'attempt' && prev && prev.db && prev.db.crimesByType && Array.isArray(fresh.crimesByType && fresh.crimesByType.availableItems)) {
+      const before = Object.fromEntries((prev.db.crimesByType.availableItems || []).map(i => [i.itemID, i.total]));
+      const used = data.used = data.used || {};
+      const u = used[typeID] = used[typeID] || { items: {}, nerve: 0, actions: 0 };
+      for (const it of fresh.crimesByType.availableItems) {
+        const d = (before[it.itemID] ?? it.total) - it.total;
+        if (d > 0 && d < 50) u.items[it.itemID] = (u.items[it.itemID] || 0) + d;
+      }
+      const lastSnap = data.last[typeID];
+      const dN = db.currentUserStats && lastSnap ? db.currentUserStats.nerveUsed - lastSnap.nerve : 0;
+      if (dN > 0 && dN <= 60) { u.nerve += dN; u.actions += 1; }
+    }
     // A crime result can carry less than the full page (e.g. no rig section after a crack attempt).
     // Merge it into what we already have instead of replacing it, so missing parts keep their last value.
     if (step !== 'crimesList' && prev && prev.db && isPlainObj(prev.db.crimesByType) && isPlainObj(fresh.crimesByType)) {
@@ -490,6 +588,16 @@ function scamTargetConcern(t) { return scamFlags(t).concern; }
 // Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
 const FORGERY_MATERIAL_DEFAULT = { Passport: 90000 };
 
+
+// Value of items a crime has used up (tracked from item counts before/after each action), per nerve, at current prices.
+function itemCostPerNerve(data, typeID) {
+  const u = data && data.used && data.used[typeID];
+  if (!u || u.nerve < 20 || !Prices.ready()) return null;
+  let value = 0;
+  for (const [id, n] of Object.entries(u.items)) value += (Prices.of(Number(id)) || 0) * n;
+  return { perN: value / u.nerve, value, nerve: u.nerve, actions: u.actions };
+}
+
 const Analyzers = {
   9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
@@ -639,7 +747,10 @@ const Analyzers = {
       const range = REF.pickpocketing[String(m.title).toLowerCase()];
       const sr = successRate(db.stats, m.crimeID);
       // Cyclists are worth far more than their cash: Emforus puts them at ~10k/N because ~1 in 15 drops Xanax.
-      const prior = /cyclist/i.test(m.title) ? 10000 : (range ? mid(range) * sr.p / (m.nerve || 5) : null);
+      const xan = Prices.of('Xanax');
+      const prior = /cyclist/i.test(m.title)
+        ? (xan ? ((range ? mid(range) : 0) * sr.p + xan / 15) / (m.nerve || 5) : 10000)   // ~1 in 15 cyclists drops Xanax (Emforus)
+        : (range ? mid(range) * sr.p / (m.nerve || 5) : null);
       const b = blend(prior, actionValue(data, 5, m.crimeID));
       const status = m.crimeInfo && m.crimeInfo.status ? m.crimeInfo.status.title : '';
       const learnedPP = actionValue(data, 5, m.crimeID);
@@ -745,18 +856,24 @@ const Analyzers = {
       const steps = (bp.steps || []).length || 4;
       const nerve = steps * 5 / pooled(bp);
       const setCost = settings.materials && settings.materials[name];
+      const priced = materialCostFromPrices(name);
+      const priceCost = priced && !priced.missing.length ? priced.total : undefined;
       const defCost = FORGERY_MATERIAL_DEFAULT[name];
-      const cost = setCost ?? defCost ?? null;
-      const gross = price ? price / nerve : null;
-      const perN = price && cost !== null ? (price - cost) / nerve : gross;
+      const cost = setCost ?? priceCost ?? defCost ?? null;
+      const market = Prices.of(name);
+      const sale = Math.max(price || 0, market || 0) || null;
+      const gross = sale ? sale / nerve : null;
+      const perN = sale && cost !== null ? (sale - cost) / nerve : gross;
       const costTxt = setCost !== undefined ? `materials ${fmt.money(setCost)} (yours)`
-        : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed)` : 'materials not set';
+        : priceCost !== undefined ? `materials ~${fmt.money(priceCost)} (market prices, 1 of each)`
+        : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed${priced && priced.missing.length ? `; no price for ${priced.missing.join(', ')}` : ''})` : 'materials not set';
+      const sellTip = market && price && market > price * 1.03 ? ` · sells for ${fmt.money(market)} on the item market (Print Store pays ${fmt.money(price)})` : '';
       return {
         key: name, perN, nerve: Math.round(nerve), units: Infinity, gross,
         src: cost !== null ? 'after materials' : 'before materials', noPick: cost === null,
         short: perN ? `${fmt.perN(perN)} · ${Math.round(nerve)}N` : 'price unknown',
         label: name,
-        detail: `${steps} steps · ~${Math.round(nerve)}N with your step success · ${price ? fmt.money(price) + ' at the Print Store' : 'price unknown'} · ${costTxt}`,
+        detail: `${steps} steps · ~${Math.round(nerve)}N with your step success · ${price ? fmt.money(price) + ' at the Print Store' : 'price unknown'} · ${costTxt}${sellTip}`,
         sort: perN || 0,
       };
     }).sort((a, b) => b.sort - a.sort);
@@ -816,14 +933,15 @@ const Analyzers = {
       options: [], detail: `Farming: ${farmTxt}`,
     };
   },
-  13(db) { // Arson: collect → light every hands-off job and let it burn → then work the jobs that need watching
+  13(db, data) { // Arson: collect → light every hands-off job and let it burn → then work the jobs that need watching
     const c = db.crimesByType || {};
     const st = db.stats || {};
     const jobs = c.targets || [];
     const have = Object.fromEntries((c.availableItems || []).map(i => [i.itemID, i.total]));
     const perJob = st.rewardsCollected ? st.moneyFoundTotal / st.rewardsCollected : null;
     const nervePerJob = st.rewardsCollected ? st.nerveUsed / st.rewardsCollected : 23;
-    const rate = perJob ? perJob / nervePerJob : null;
+    const itemCost = itemCostPerNerve(data, 13);
+    const rate = perJob ? perJob / nervePerJob - (itemCost ? itemCost.perN : 0) : null;
     const acts = j => (j.availableActions || []).map(a => a.title);
     const first = j => (j.availableActions || [])[0] || {};
     const needs = j => (j.icons || []).filter(i => i.type === 'B2' && Array.isArray(i.value));
@@ -850,7 +968,8 @@ const Analyzers = {
     if (handsOff.length) steps.push({ action: `Light ${handsOff[0].title}: ${nextAct(handsOff[0])}, through Ignite, then leave it to burn` +
         (handsOff.length > 1 ? ` · ${handsOff.length - 1} more to light the same way` : ''),
       perN: rate, nerve: 13, units: handsOff.length,
-      why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` });
+      why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` +
+        (itemCost ? ` · accelerants cost you ~${fmt.perN(itemCost.perN)} (tracked over ${itemCost.nerve}N)` : '') });
     if (watched.length) steps.push({ action: `Work ${watched[0].title} (${rule(watched[0])}): ${isBurning(watched[0]) ? 'watch it and dampen before it passes the limit' : nextAct(watched[0])}` +
         (watched.length > 1 ? ` · ${watched.length - 1} more like it` : ''),
       perN: rate, nerve: Math.round(nervePerJob), units: watched.length,
@@ -1011,7 +1130,9 @@ const CSS = `
 .ca-badge.ca-tl{top:3px;left:3px}
 .ca-badge.ca-tr{top:3px;right:3px}
 .ca-pick{outline:2px solid #3c8d4f !important;outline-offset:-2px}
-.ca-line{padding:5px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
+.ca-line{display:flex;justify-content:space-between;gap:10px;padding:5px 10px;margin:6px 0;font-size:12px;border-left:3px solid #3c8d4f;background:rgba(60,141,79,.12);border-radius:3px}
+.ca-ctl{white-space:nowrap;opacity:.85}
+.ca-btn{background:none;border:0;padding:0;font:inherit;color:inherit;text-decoration:underline;cursor:pointer}
 `;
 
 function h(tag, cls, text) {
@@ -1055,9 +1176,28 @@ function headerLine(text) {
   const header = document.querySelector('.crimes-app-header') || document.querySelector('.content-title');
   if (!header || !header.parentNode) return;
   let line = document.getElementById('ca-line');
-  if (!line) { line = h('div', 'ca-line'); line.id = 'ca-line'; }
+  if (!line) {
+    line = h('div', 'ca-line'); line.id = 'ca-line';
+    const msg = h('span'); msg.id = 'ca-msg'; line.appendChild(msg);
+    const ctl = h('span', 'ca-ctl');
+    const key = h('button', 'ca-btn', Prices.key() ? 'API key ✓' : 'Add API key'); key.type = 'button'; key.id = 'ca-key';
+    key.addEventListener('click', e => {
+      e.preventDefault();
+      const k = prompt('Torn API key for item prices (Public access is enough). Stored in this browser only; sent only to api.torn.com. Leave empty to remove.', Prices.key());
+      if (k === null) return;
+      Prices.setKey(k);
+      key.textContent = Prices.key() ? 'API key ✓' : 'Add API key';
+      Prices.refresh(pageFetch).then(() => UI.render());
+    });
+    const exp = h('button', 'ca-btn', 'Export data'); exp.type = 'button'; exp.id = 'ca-export';
+    exp.addEventListener('click', e => { e.preventDefault(); exportRaw(); });
+    ctl.appendChild(key); ctl.appendChild(document.createTextNode(' · ')); ctl.appendChild(exp);
+    line.appendChild(ctl);
+  }
   if (line.previousElementSibling !== header) header.parentNode.insertBefore(line, header.nextSibling);
-  if (line.textContent !== text) line.textContent = text;
+  const msg = document.getElementById('ca-msg');
+  const full = text + (Prices.error ? ` · prices: ${Prices.error}` : '');
+  if (msg.textContent !== full) msg.textContent = full;
 }
 
 const UI = {
@@ -1162,9 +1302,13 @@ const UI = {
 
 // ---------- main ----------
 const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+const pageFetch = (...a) => pageWin.fetch(...a);
 installHooks(pageWin, () => UI.render());
 try { pageWin.crimeAdvisorExport = exportRaw; pageWin.crimeAdvisorSet = setSetting; } catch { /* ignore */ }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => UI.mount());
 else UI.mount();
+// Item prices: once on load, then whenever the 6-hour cache runs out.
+Prices.refresh(pageFetch).then(ok => { if (ok) UI.render(); });
+setInterval(() => Prices.refresh(pageFetch).then(ok => { if (ok) UI.render(); }), 15 * 60 * 1000);
 
 })();

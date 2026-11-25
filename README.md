@@ -21,6 +21,20 @@ A read-only userscript for Torn Crimes 2.0. It tells you which crime to spend ne
 - **Nerve plan:** the Hub line reads your nerve from the sidebar and lists what to spend it on, best $/N first, and warns when nerve will be full within the hour.
 - **Backup read:** if the page loaded its crime data before the script was listening, it reads the same data from the rendered page.
 
+## Item prices (optional API key)
+
+Click **Add API key** on the Advisor's green line and paste a Torn API key (Public access). With prices, the Advisor:
+
+- prices Forgery materials at market value (and tells you when the item market pays more than the Print Store),
+- subtracts the accelerants Arson actually used, tracked from your item counts before and after each action,
+- values cyclists by the Xanax they drop.
+
+| Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
+| --- | --- | --- | --- | --- |
+| Item prices cached in your browser for 6 hours; crime stats in your browser | Nobody: nothing leaves your browser except the price request to api.torn.com | Valuing items used and earned by crimes | Stored in your browser's local storage only; sent only to api.torn.com | Public |
+
+**Export data** on the same line downloads what the Advisor has saved (no API key included), for troubleshooting.
+
 ## Between visits
 
 The script can only read a crime while you have it open, so it fills the gaps itself:
