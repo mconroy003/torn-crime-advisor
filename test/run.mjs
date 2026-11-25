@@ -94,16 +94,21 @@ if (existsSync('test/fixtures/c2.json')) {
   ok(Math.abs(after - before) < 1, `Cracking estimate kept after an attempt without rig data (${Math.round(before)} → ${Math.round(after)})`);
 }
 
-// Fix: scam targets that are hesitating or have a concern aren't "reply now".
-{
+// Scam targets from a real export: hesitation cooldown, concern tile, safest reply.
+if (existsSync('test/fixtures/e1.json')) {
+  const ex = JSON.parse(readFileSync('test/fixtures/e1.json', 'utf8'));
+  const t = ex.raw['12:crimesList'].response.DB.crimesByType.targets[0];
+  ctx.__t = t;
   const st = { targetsScammedSucc: 800, targetsScammedFail: 200, moneyAwarded: 112e6, crimesByIDAttempts: { 291: 400, 292: 7000 }, concernsAttempts: 400, concernsResolved: 140 };
-  ctx.__db = (targets) => ({ crimesByType: { targets, methods: [], farming: { currentOngoing: [{ type: 'scraper', currentValue: 10 }] } }, stats: st });
-  const hes = run(`Analyzers[12](__db([{ title: 'A', state: { name: 'Hesitation' } }]), Store.load(), {})`);
-  ok(hes.steps[0].wait && !hes.actionable, `hesitating target → wait (${hes.note})`);
-  const con = run(`Analyzers[12](__db([{ title: 'B', zone: 'concern' }]), Store.load(), {})`);
-  ok(/Resolve the concern/.test(con.steps[0].action), `concern target → resolve (${con.steps[0].action})`);
-  const mix = run(`Analyzers[12](__db([{ title: 'A', state: 'hesitation' }, { title: 'C', expire: ${Math.floor(Date.now() / 1000) + 3600} }]), Store.load(), {})`);
-  ok(/Reply to 1 target/.test(mix.steps[0].action), `normal target with an expiry is still replyable (${mix.steps[0].action})`);
+  ctx.__db = (targets) => ({ crimesByType: { targets, methods: [], farming: { currentOngoing: [{ type: 'phisher', currentValue: 10 }] } }, stats: st });
+  atTime(new Date((t.cooldown - 60) * 1000).toISOString());
+  const w = run(`Analyzers[12](__db([__t]), Store.load(), {})`);
+  ok(w.steps[0].wait && !w.actionable, `hesitating (cooldown running) → wait (${w.steps[0].action})`);
+  atTime(new Date((t.cooldown + 60) * 1000).toISOString());
+  const r = run(`Analyzers[12](__db([__t]), Store.load(), {})`);
+  ok(/^Reply to 1 target/.test(r.steps[0].action) && /safest reply/.test(r.steps[0].action), `cooldown over → reply, with safest move (${r.steps[0].action.slice(0, 120)})`);
+  const c = run(`Analyzers[12](__db([Object.assign({}, __t, { cooldown: 0, barPosition: 'concern' })]), Store.load(), {})`);
+  ok(/Resolve the concern/.test(c.steps[0].action), 'on a concern tile → resolve');
 }
 
 // Arson: light hands-off jobs first, never "continue" one that's burning on its own, watch ceiling jobs.

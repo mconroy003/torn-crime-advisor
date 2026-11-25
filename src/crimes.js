@@ -54,30 +54,32 @@ function sfcByClock(title, now) {
 }
 
 
-// Scamming targets: the field names for hesitation/concern aren't confirmed yet, so look for them broadly.
-// A target counts as waiting when it is hesitating or otherwise on a timer you can't act through.
-function scamFlags(t) {
-  const text = JSON.stringify(t).toLowerCase();
-  return { hesitation: /hesitat|cooldown|cooling/.test(text), concern: /concern/.test(text) };
-}
-function scamWaitSeconds(t) {
-  const now = Date.now() / 1000;
-  let best = 0;
-  (function walk(o, depth) {
-    if (!o || typeof o !== 'object' || depth > 3) return;
-    for (const [k, v] of Object.entries(o)) {
-      if (typeof v === 'number' && /hesitat|cooldown|until/i.test(k) && v > now && v < now + 86400) best = best ? Math.min(best, v - now) : v - now;
-      else if (typeof v === 'object') walk(v, depth + 1);
+// Scamming targets (fields confirmed from a real export): `cooldown` = when a hesitation ends (epoch seconds),
+// `barPosition` = the tile you're on ('neutral', 'hesitation', 'concern', 'temptation', 'low'/'medium'/'high', 'fail'),
+// `bar` = the 50 tiles, `pip` = your index on it, `actionMin`/`actionMax` = how far each reply moves you.
+function scamWaitSeconds(t) { return t && t.cooldown ? Math.max(0, t.cooldown - Date.now() / 1000) : 0; }
+function scamTargetWaiting(t) { return scamWaitSeconds(t) > 0; }
+function scamTargetConcern(t) { return !scamTargetWaiting(t) && t.barPosition === 'concern'; }
+
+// Safest next reply: score where each reply could land, uniformly across its range.
+const TILE_SCORE = { high: 3, medium: 2, low: 1.2, temptation: 0.6, neutral: 0.4, sensitivity: 0, hesitation: -0.6, concern: -1, fail: -4 };
+function scamBestReply(t) {
+  if (!t || !Array.isArray(t.bar) || typeof t.pip !== 'number' || !t.actionMin) return null;
+  let best = null;
+  for (const [act, min] of Object.entries(t.actionMin)) {
+    const max = (t.actionMax && t.actionMax[act]) ?? min;
+    if (!max && !min) continue;                       // accelerator has no move of its own
+    const dir = act === 'backward' ? -1 : 1;
+    let score = 0, n = 0, reward = 0;
+    for (let d = min; d <= max; d++) {
+      const tile = t.bar[Math.max(0, Math.min(t.bar.length - 1, t.pip + dir * d))] || 'neutral';
+      score += TILE_SCORE[tile] ?? 0; n++; if (/^(low|medium|high)$/.test(tile)) reward++;
     }
-  })(t, 0);
+    const cand = { act, name: (t.actionsNames && t.actionsNames[act]) || act, score: score / n, reward: reward / n, from: t.pip + dir * min, to: t.pip + dir * max };
+    if (!best || cand.score > best.score) best = cand;
+  }
   return best;
 }
-function scamTargetWaiting(t) {
-  const f = scamFlags(t);
-  if (f.hesitation) return true;
-  return scamWaitSeconds(t) > 0 && !f.concern;
-}
-function scamTargetConcern(t) { return scamFlags(t).concern; }
 
 // Material cost per Forgery project when you haven't set your own (crimeAdvisorSet('materials', 'Passport', 90000)).
 // Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
@@ -411,7 +413,9 @@ const Analyzers = {
     const steps = [];
     if (concerned.length) steps.push({ action: `Resolve the concern on ${concerned.length} target${concerned.length > 1 ? 's' : ''} (3N per try)`, perN: workRate ? workRate * 0.5 : null, nerve: 3, units: concerned.length * 2,
       why: 'concerns often take a few tries; you resolve about ' + (st.concernsAttempts ? Math.round(100 * (st.concernsResolved || 0) / st.concernsAttempts) : '?') + '% of attempts' });
-    if (replyable.length) steps.push({ action: `Reply to ${replyable.length} target${replyable.length > 1 ? 's' : ''} (3N per reply)`, perN: workRate, nerve: 3, units: Math.round(replyable.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
+    const tip = replyable.length ? scamBestReply(replyable[0]) : null;
+    const tipTxt = tip ? ` · safest reply for ${replyable[0].name || 'the first'} (${replyable[0].scamMethod || 'scam'}): ${tip.name}${tip.reward ? `, ${Math.round(tip.reward * 100)}% chance to land in a reward zone` : ''}` : '';
+    if (replyable.length) steps.push({ action: `Reply to ${replyable.length} target${replyable.length > 1 ? 's' : ''} (3N per reply)${tipTxt}`, perN: workRate, nerve: 3, units: Math.round(replyable.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
     if (waitingOn.length && !replyable.length && !concerned.length) {
       const soonest = Math.min(...waitingOn.map(scamWaitSeconds).filter(x => x > 0));
       steps.push({ action: `Wait: ${waitingOn.length} target${waitingOn.length > 1 ? 's are' : ' is'} hesitating${Number.isFinite(soonest) ? ` (next free in ~${fmt.dur(soonest)})` : ' (usually 1–2 h)'}`, perN: null, wait: true });
