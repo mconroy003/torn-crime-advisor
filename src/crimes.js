@@ -84,6 +84,7 @@ function scamBestReply(t) {
 // Material cost per Forgery project when you haven't set your own (crimeAdvisorSet('materials', 'Passport', 90000)).
 // Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
 const FORGERY_MATERIAL_DEFAULT = { Passport: 90000 };
+const lastProjectName = c => { const p = (c.projects || [])[0]; return p ? p.projectTitle : 'Passport'; };
 
 
 // Value of items a crime has used up (tracked from item counts before/after each action), per nerve, at current prices.
@@ -91,7 +92,8 @@ function itemCostPerNerve(data, typeID) {
   const u = data && data.used && data.used[typeID];
   if (!u || u.nerve < 20 || !Prices.ready()) return null;
   let value = 0;
-  for (const [id, n] of Object.entries(u.items)) value += (Prices.of(Number(id)) || 0) * n;
+  for (const [id, n] of Object.entries(u.items || {})) value += (Prices.of(Number(id)) || 0) * n;
+  for (const [name, n] of Object.entries(u.names || {})) value += (Prices.of(name) || 0) * n;
   return { perN: value / u.nerve, value, nerve: u.nerve, actions: u.actions };
 }
 
@@ -356,12 +358,15 @@ const Analyzers = {
       const priced = materialCostFromPrices(name);
       const priceCost = priced && !priced.missing.length ? priced.total : undefined;
       const defCost = FORGERY_MATERIAL_DEFAULT[name];
-      const cost = setCost ?? priceCost ?? defCost ?? null;
+      const measured = name === lastProjectName(c) ? itemCostPerNerve(data, 11) : null;   // per nerve, from your own steps
+      const measuredCost = measured ? measured.perN * nerve : undefined;
+      const cost = setCost ?? measuredCost ?? priceCost ?? defCost ?? null;
       const market = Prices.of(name);
       const sale = Math.max(price || 0, market || 0) || null;
       const gross = sale ? sale / nerve : null;
       const perN = sale && cost !== null ? (sale - cost) / nerve : gross;
       const costTxt = setCost !== undefined ? `materials ${fmt.money(setCost)} (yours)`
+        : measuredCost !== undefined ? `materials ~${fmt.money(measuredCost)} (measured over ${measured.nerve}N of your steps)`
         : priceCost !== undefined ? `materials ~${fmt.money(priceCost)} (market prices, 1 of each)`
         : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed${priced && priced.missing.length ? `; no price for ${priced.missing.join(', ')}` : ''})` : 'materials not set';
       const sellTip = market && price && market > price * 1.03 ? ` · sells for ${fmt.money(market)} on the item market (Print Store pays ${fmt.money(price)})` : '';
@@ -375,13 +380,39 @@ const Analyzers = {
       };
     }).sort((a, b) => b.sort - a.sort);
     if (opts.length && opts[0].perN) opts[0].best = true;
-    const n = (c.projects || []).length;
     const best = opts.find(o => !o.noPick && o.perN) || opts[0];
-    const printers = c.totalPrinters ? `${c.totalPrinters - (c.totalPrintersInUse || 0)} of ${c.totalPrinters} printers free` : '';
+
+    // Projects already running: finish the ones closest to done; skip drying or blocked ones.
+    const projects = c.projects || [];
+    const blockedReason = p => p.unavailableReason && !/nerve/i.test(p.unavailableReason) ? p.unavailableReason.replace(/^You don't have the required item: /, 'need ') : null;
+    const drying = p => p.additionalInfo && p.additionalInfo.cooldownStatus;
+    const ready = projects.filter(p => !blockedReason(p) && !drying(p)).sort((a, b) => (b.additionalInfo.step || 0) - (a.additionalInfo.step || 0));
+    const blocked = projects.filter(blockedReason);
+    const dryingN = projects.filter(p => !blockedReason(p) && drying(p)).length;
+    const outOf = [];
+    const seen = new Set();
+    projects.forEach(p => ((p.additionalInfo && p.additionalInfo.usableItems) || []).forEach(u => {
+      if (seen.has(u.label)) return; seen.add(u.label);
+      if (!u.itemsAmount) outOf.push(`${u.label} (${u.amount}% of the last one left)`);
+    }));
+    const byStep = {};
+    ready.forEach(p => { const k = `${p.title} (step ${p.additionalInfo.step})`; byStep[k] = (byStep[k] || 0) + 1; });
+    const stepList = Object.entries(byStep).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join(', ');
+    const steps = [];
+    if (ready.length) steps.push({ action: `Advance ${ready.length} project${ready.length > 1 ? 's' : ''}, furthest along first: ${stepList}`,
+      perN: best ? best.perN : null, nerve: 5, units: ready.length, why: 'each step brings a Passport closer to its sale' });
+    if (best && best.perN) steps.push({ action: `Start new ${best.label} projects`, perN: best.perN, nerve: best.nerve, units: Infinity, deferred: true, why: best.detail.split(' · ').pop() });
+    const warn = [
+      blocked.length ? `${blocked.length} blocked: ${[...new Set(blocked.map(blockedReason))].join(', ')}` : null,
+      dryingN ? `${dryingN} drying` : null,
+      outOf.length ? `buy more: ${outOf.join(', ')}` : null,
+      c.totalPrinters ? `${c.totalPrinters - (c.totalPrintersInUse || 0)} of ${c.totalPrinters} printers free` : null,
+    ].filter(Boolean).join(' · ');
+    const next = steps[0];
     return {
-      actionable: !!best,
-      note: best ? `Next: ${n ? `advance your ${n} project${n > 1 ? 's' : ''} where a step is ready, then ` : ''}start ${best.label} projects (${best.short}; ${best.detail.split(' · ').pop()})${printers ? ' · ' + printers : ''}` : 'No projects available',
-      options: opts,
+      actionable: !!next,
+      note: next ? `Next: ${next.action}${warn ? ' · ' + warn : ''}` : (warn || 'No projects available'),
+      steps, stepRate: next ? next.perN : null, options: opts,
     };
   },
   12(db) { // Scamming: farm → spam wave → reply to targets → capitalize
@@ -529,6 +560,19 @@ function rankAll(data) {
   const tier = r => (r.actionable ? (r.noPick ? 1 : 2) : 0);
   rows.sort((x, y) => (tier(y) - tier(x)) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
   const top = rows.find(r => r.actionable && !r.noPick && r.rate !== null && r.rate > 0) || null;
+  // Explain a change of top pick, so a switch never looks random.
+  if (top) {
+    const prev = data.lastTop;
+    if (prev && prev.typeID !== top.typeID) {
+      const was = rows.find(r => r.typeID === prev.typeID);
+      top.switchedFrom = was ? `${was.name} is now ${was.actionable ? fmt.perN(was.rate) : 'done for now'}${was.note ? ` (${was.note.replace(/^Next: /, '').slice(0, 60)})` : ''}` : null;
+    }
+    if (!prev || prev.typeID !== top.typeID) data.lastTop = { typeID: top.typeID, at: Date.now(), was: prev ? prev.typeID : null };
+    else if (prev.was) {
+      const was = rows.find(r => r.typeID === prev.was);
+      if (was && Date.now() - prev.at < 30 * 60000) top.switchedFrom = `${was.name} is now ${was.actionable ? fmt.perN(was.rate) : 'done for now'}`;
+    }
+  }
   rows.forEach(r => {
     if (!top || r === top) return;
     if (!r.actionable) r.why = 'nothing to do right now';

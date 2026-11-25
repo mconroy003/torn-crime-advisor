@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.8.1
+// @version      0.9.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -332,6 +332,24 @@ function handleResponse(url, body, json, now = Date.now()) {
   if (typeID && db.crimesByType) {
     const fresh = trimDB(db);
     const prev = data.state[typeID];
+    // Forgery: materials are shared across projects as "open item % left + spare items", so the stock before and after
+    // a step shows how much of an item that step used (e.g. Glue 40% + 64 spares → 35% + 64 = 0.05 of a Glue).
+    if (typeID === 11 && step === 'attempt' && prev && prev.db) {
+      const stock = cbt => { const m = {}; ((cbt && cbt.projects) || []).forEach(p => ((p.additionalInfo && p.additionalInfo.usableItems) || [])
+        .forEach(u => { m[u.label] = (u.itemsAmount || 0) + (u.amount || 0) / 100; })); return m; };
+      const before = stock(prev.db.crimesByType), after = stock(fresh.crimesByType);
+      const used = data.used = data.used || {};
+      const u = used[11] = used[11] || { items: {}, names: {}, nerve: 0, actions: 0 };
+      u.names = u.names || {};
+      for (const [label, b] of Object.entries(before)) {
+        if (after[label] === undefined) continue;
+        const d = b - after[label];
+        if (d > 0 && d < 5) u.names[label] = (u.names[label] || 0) + d;
+      }
+      const lastSnap = data.last[11];
+      const dN = db.currentUserStats && lastSnap ? db.currentUserStats.nerveUsed - lastSnap.nerve : 0;
+      if (dN > 0 && dN <= 60) { u.nerve += dN; u.actions += 1; }
+    }
     // Items used up by this action: compare item counts the crime page lists (e.g. Arson accelerants) before and after.
     if (step === 'attempt' && prev && prev.db && prev.db.crimesByType && Array.isArray(fresh.crimesByType && fresh.crimesByType.availableItems)) {
       const before = Object.fromEntries((prev.db.crimesByType.availableItems || []).map(i => [i.itemID, i.total]));
@@ -589,6 +607,7 @@ function scamBestReply(t) {
 // Material cost per Forgery project when you haven't set your own (crimeAdvisorSet('materials', 'Passport', 90000)).
 // Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
 const FORGERY_MATERIAL_DEFAULT = { Passport: 90000 };
+const lastProjectName = c => { const p = (c.projects || [])[0]; return p ? p.projectTitle : 'Passport'; };
 
 
 // Value of items a crime has used up (tracked from item counts before/after each action), per nerve, at current prices.
@@ -596,7 +615,8 @@ function itemCostPerNerve(data, typeID) {
   const u = data && data.used && data.used[typeID];
   if (!u || u.nerve < 20 || !Prices.ready()) return null;
   let value = 0;
-  for (const [id, n] of Object.entries(u.items)) value += (Prices.of(Number(id)) || 0) * n;
+  for (const [id, n] of Object.entries(u.items || {})) value += (Prices.of(Number(id)) || 0) * n;
+  for (const [name, n] of Object.entries(u.names || {})) value += (Prices.of(name) || 0) * n;
   return { perN: value / u.nerve, value, nerve: u.nerve, actions: u.actions };
 }
 
@@ -861,12 +881,15 @@ const Analyzers = {
       const priced = materialCostFromPrices(name);
       const priceCost = priced && !priced.missing.length ? priced.total : undefined;
       const defCost = FORGERY_MATERIAL_DEFAULT[name];
-      const cost = setCost ?? priceCost ?? defCost ?? null;
+      const measured = name === lastProjectName(c) ? itemCostPerNerve(data, 11) : null;   // per nerve, from your own steps
+      const measuredCost = measured ? measured.perN * nerve : undefined;
+      const cost = setCost ?? measuredCost ?? priceCost ?? defCost ?? null;
       const market = Prices.of(name);
       const sale = Math.max(price || 0, market || 0) || null;
       const gross = sale ? sale / nerve : null;
       const perN = sale && cost !== null ? (sale - cost) / nerve : gross;
       const costTxt = setCost !== undefined ? `materials ${fmt.money(setCost)} (yours)`
+        : measuredCost !== undefined ? `materials ~${fmt.money(measuredCost)} (measured over ${measured.nerve}N of your steps)`
         : priceCost !== undefined ? `materials ~${fmt.money(priceCost)} (market prices, 1 of each)`
         : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed${priced && priced.missing.length ? `; no price for ${priced.missing.join(', ')}` : ''})` : 'materials not set';
       const sellTip = market && price && market > price * 1.03 ? ` · sells for ${fmt.money(market)} on the item market (Print Store pays ${fmt.money(price)})` : '';
@@ -880,13 +903,39 @@ const Analyzers = {
       };
     }).sort((a, b) => b.sort - a.sort);
     if (opts.length && opts[0].perN) opts[0].best = true;
-    const n = (c.projects || []).length;
     const best = opts.find(o => !o.noPick && o.perN) || opts[0];
-    const printers = c.totalPrinters ? `${c.totalPrinters - (c.totalPrintersInUse || 0)} of ${c.totalPrinters} printers free` : '';
+
+    // Projects already running: finish the ones closest to done; skip drying or blocked ones.
+    const projects = c.projects || [];
+    const blockedReason = p => p.unavailableReason && !/nerve/i.test(p.unavailableReason) ? p.unavailableReason.replace(/^You don't have the required item: /, 'need ') : null;
+    const drying = p => p.additionalInfo && p.additionalInfo.cooldownStatus;
+    const ready = projects.filter(p => !blockedReason(p) && !drying(p)).sort((a, b) => (b.additionalInfo.step || 0) - (a.additionalInfo.step || 0));
+    const blocked = projects.filter(blockedReason);
+    const dryingN = projects.filter(p => !blockedReason(p) && drying(p)).length;
+    const outOf = [];
+    const seen = new Set();
+    projects.forEach(p => ((p.additionalInfo && p.additionalInfo.usableItems) || []).forEach(u => {
+      if (seen.has(u.label)) return; seen.add(u.label);
+      if (!u.itemsAmount) outOf.push(`${u.label} (${u.amount}% of the last one left)`);
+    }));
+    const byStep = {};
+    ready.forEach(p => { const k = `${p.title} (step ${p.additionalInfo.step})`; byStep[k] = (byStep[k] || 0) + 1; });
+    const stepList = Object.entries(byStep).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join(', ');
+    const steps = [];
+    if (ready.length) steps.push({ action: `Advance ${ready.length} project${ready.length > 1 ? 's' : ''}, furthest along first: ${stepList}`,
+      perN: best ? best.perN : null, nerve: 5, units: ready.length, why: 'each step brings a Passport closer to its sale' });
+    if (best && best.perN) steps.push({ action: `Start new ${best.label} projects`, perN: best.perN, nerve: best.nerve, units: Infinity, deferred: true, why: best.detail.split(' · ').pop() });
+    const warn = [
+      blocked.length ? `${blocked.length} blocked: ${[...new Set(blocked.map(blockedReason))].join(', ')}` : null,
+      dryingN ? `${dryingN} drying` : null,
+      outOf.length ? `buy more: ${outOf.join(', ')}` : null,
+      c.totalPrinters ? `${c.totalPrinters - (c.totalPrintersInUse || 0)} of ${c.totalPrinters} printers free` : null,
+    ].filter(Boolean).join(' · ');
+    const next = steps[0];
     return {
-      actionable: !!best,
-      note: best ? `Next: ${n ? `advance your ${n} project${n > 1 ? 's' : ''} where a step is ready, then ` : ''}start ${best.label} projects (${best.short}; ${best.detail.split(' · ').pop()})${printers ? ' · ' + printers : ''}` : 'No projects available',
-      options: opts,
+      actionable: !!next,
+      note: next ? `Next: ${next.action}${warn ? ' · ' + warn : ''}` : (warn || 'No projects available'),
+      steps, stepRate: next ? next.perN : null, options: opts,
     };
   },
   12(db) { // Scamming: farm → spam wave → reply to targets → capitalize
@@ -1034,6 +1083,19 @@ function rankAll(data) {
   const tier = r => (r.actionable ? (r.noPick ? 1 : 2) : 0);
   rows.sort((x, y) => (tier(y) - tier(x)) || ((y.rate ?? -1e12) - (x.rate ?? -1e12)));
   const top = rows.find(r => r.actionable && !r.noPick && r.rate !== null && r.rate > 0) || null;
+  // Explain a change of top pick, so a switch never looks random.
+  if (top) {
+    const prev = data.lastTop;
+    if (prev && prev.typeID !== top.typeID) {
+      const was = rows.find(r => r.typeID === prev.typeID);
+      top.switchedFrom = was ? `${was.name} is now ${was.actionable ? fmt.perN(was.rate) : 'done for now'}${was.note ? ` (${was.note.replace(/^Next: /, '').slice(0, 60)})` : ''}` : null;
+    }
+    if (!prev || prev.typeID !== top.typeID) data.lastTop = { typeID: top.typeID, at: Date.now(), was: prev ? prev.typeID : null };
+    else if (prev.was) {
+      const was = rows.find(r => r.typeID === prev.was);
+      if (was && Date.now() - prev.at < 30 * 60000) top.switchedFrom = `${was.name} is now ${was.actionable ? fmt.perN(was.rate) : 'done for now'}`;
+    }
+  }
   rows.forEach(r => {
     if (!top || r === top) return;
     if (!r.actionable) r.why = 'nothing to do right now';
@@ -1111,8 +1173,19 @@ function capWarning(nerve) {
   return min <= 60 ? `Nerve full in ~${min} min` : null;
 }
 
+// With too little nerve for anything worth doing, say so plainly and when that changes.
+function outOfNerve(nerve, plan) {
+  if (!nerve || plan.steps.length) return null;
+  const need = 5 - nerve.cur;
+  if (need <= 0) return null;
+  const at = new Date(Date.now() + need * NERVE_REGEN_MIN * 60000);
+  return `Out of nerve (${nerve.cur}N): you'll have 5N around ${at.toISOString().slice(11, 16)} TCT`;
+}
+
 function planText(plan, nerve) {
   if (!nerve) return '';
+  const out = outOfNerve(nerve, plan);
+  if (out) return out;
   const parts = plan.steps.slice(0, 4).map(s =>
     `${s.crime}${s.label ? ': ' + s.label : ''}${s.count > 1 ? ' ×' + s.count : ''} (${s.count * s.nerve}N, ${fmt.perN(s.perN)})`);
   let t = `With ${nerve.cur}N: ` + (parts.length ? parts.join(' → ') : 'nothing worth it yet');
@@ -1231,7 +1304,7 @@ const UI = {
   hub({ top, rows }) {
     const nerve = readNerve();
     const plan = planNerve(rows, nerve);
-    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})` : 'Open the crimes you play once so the Advisor can read them';
+    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})${top.switchedFrom ? ` · switched: ${top.switchedFrom}` : ''}` : 'Open the crimes you play once so the Advisor can read them';
     headerLine([head, planText(plan, nerve), capWarning(nerve)].filter(Boolean).join(' · '));
     document.querySelectorAll('.crimes-hub-root a, .crimes-hub-crime').forEach(card => {
       const titleEl = card.querySelector('[class*="crimeTitle__"]');
@@ -1255,10 +1328,12 @@ const UI = {
     // One line under the header: your $/N here, the best crime now, and this crime's status.
     {
       const parts = [`${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
-      if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
+      if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}${top.switchedFrom && top.switchedFrom.startsWith(r.name) ? ` (${r.name} dropped below it)` : ''}`);
       else if (top) parts.push('★ Best crime right now');
-      const cap = capWarning(readNerve());
+      const nv = readNerve();
+      const cap = capWarning(nv);
       if (cap) parts.push(cap);
+      if (nv && nv.cur < 2) parts.unshift(`Out of nerve (${nv.cur}N)`);
       let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
       if (!r.seenAt) {
         text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data read this page load: ${Diag.read}` +

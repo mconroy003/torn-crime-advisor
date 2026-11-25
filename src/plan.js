@@ -61,8 +61,19 @@ function capWarning(nerve) {
   return min <= 60 ? `Nerve full in ~${min} min` : null;
 }
 
+// With too little nerve for anything worth doing, say so plainly and when that changes.
+function outOfNerve(nerve, plan) {
+  if (!nerve || plan.steps.length) return null;
+  const need = 5 - nerve.cur;
+  if (need <= 0) return null;
+  const at = new Date(Date.now() + need * NERVE_REGEN_MIN * 60000);
+  return `Out of nerve (${nerve.cur}N): you'll have 5N around ${at.toISOString().slice(11, 16)} TCT`;
+}
+
 function planText(plan, nerve) {
   if (!nerve) return '';
+  const out = outOfNerve(nerve, plan);
+  if (out) return out;
   const parts = plan.steps.slice(0, 4).map(s =>
     `${s.crime}${s.label ? ': ' + s.label : ''}${s.count > 1 ? ' ×' + s.count : ''} (${s.count * s.nerve}N, ${fmt.perN(s.perN)})`);
   let t = `With ${nerve.cur}N: ` + (parts.length ? parts.join(' → ') : 'nothing worth it yet');

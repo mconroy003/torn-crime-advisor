@@ -180,5 +180,50 @@ if (existsSync('test/fixtures/e1.json')) {
 }
 function fmt_(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
 
+// Friend's Forgery: 18 Passports in progress
+if (existsSync('test/fixtures/friend.json')) {
+  const fr = JSON.parse(readFileSync('test/fixtures/friend.json', 'utf8'));
+  ctx.__f = fr.raw['11:crimesList'].response;
+  atTime(fr.raw['11:crimesList'].at);
+  run('Store.reset()');
+  run(`handleResponse('/page.php?sid=crimesData&step=crimesList', '{"typeID":"11"}', __f, Date.now())`);
+  const f = run('rankAll(Store.load())').rows.find(r => r.typeID === 11);
+  console.log('  Friend Forgery:', f.note);
+  ok(/Advance 16 projects, furthest along first: .*Lamination/.test(f.note), 'advance in-progress Passports, furthest first');
+  ok(/2 blocked: need Bonded Latex/.test(f.note) && /buy more: Cardstock/.test(f.note), 'flags blocked projects and Cardstock running out');
+  // Measured materials: a step that uses 5% of a Glue
+  const next = JSON.parse(JSON.stringify(ctx.__f));
+  next.DB.crimesByType.projects.forEach(p => (p.additionalInfo.usableItems || []).forEach(u => { if (u.label === 'Glue') u.amount -= 5; }));
+  next.DB.currentUserStats.nerveUsed += 5;
+  ctx.__n = next;
+  run(`handleResponse('/page.php?sid=crimesData&step=attempt&typeID=11&crimeID=287', null, __n, Date.now())`);
+  const u = run('Store.load().used[11]');
+  ok(Math.abs(u.names.Glue - 0.05) < 1e-9 && u.nerve === 5, `material use measured: ${u.names.Glue.toFixed(2)} of a Glue over ${u.nerve}N`);
+}
+
+// Out of nerve + switch explanation
+{
+  run('Store.reset()');
+  const plan0 = run('planNerve([], {cur:0, max:130})');
+  ok(/^Out of nerve \(0N\): you'll have 5N around/.test(run('planText')(plan0, { cur: 0, max: 130 })), 'out of nerve says when you can act again');
+  ctx.__rows = [{ typeID: 10, name: 'Cracking', actionable: true, rate: 8000, options: [] }, { typeID: 12, name: 'Scamming', actionable: true, rate: 4000, options: [] }];
+  run('Store.load().lastTop = { typeID: 10, at: Date.now() }');
+  ctx.__rows2 = [{ typeID: 12, name: 'Scamming', actionable: true, rate: 4000, note: 'Next: Send a wave', options: [] }, { typeID: 10, name: 'Cracking', actionable: true, rate: 3600, note: 'Next: Judge', options: [] }];
+}
+
+// Switch explanation through the real ranking (your capture)
+if (existsSync('test/fixtures/c2.json')) {
+  run('Store.reset()');
+  for (const file of ['c2.json']) {
+    const cap = JSON.parse(readFileSync(`test/fixtures/${file}`, 'utf8'));
+    for (const [key, list] of Object.entries(cap)) { if (key.startsWith('unknown')) continue; for (const e of [...list].reverse()) { ctx.__e = e; run('handleResponse(__e.url, __e.requestBody, __e.response, Date.parse(__e.capturedAt))'); } }
+  }
+  atTime('2026-11-23T21:00:00Z');
+  run('Store.load().lastTop = { typeID: 12, at: Date.now() - 60000 }');
+  const t = run('rankAll(Store.load())').top;
+  console.log('  switch note:', t.name, '|', t.switchedFrom);
+  ok(t.typeID !== 12 && /^Scamming is now/.test(t.switchedFrom || ''), 'top-pick switch is explained');
+}
+
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);

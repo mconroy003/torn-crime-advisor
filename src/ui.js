@@ -109,7 +109,7 @@ const UI = {
   hub({ top, rows }) {
     const nerve = readNerve();
     const plan = planNerve(rows, nerve);
-    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})` : 'Open the crimes you play once so the Advisor can read them';
+    const head = top ? `★ Best now: ${top.name} ${fmt.perN(top.rate)} (${top.source})${top.switchedFrom ? ` · switched: ${top.switchedFrom}` : ''}` : 'Open the crimes you play once so the Advisor can read them';
     headerLine([head, planText(plan, nerve), capWarning(nerve)].filter(Boolean).join(' · '));
     document.querySelectorAll('.crimes-hub-root a, .crimes-hub-crime').forEach(card => {
       const titleEl = card.querySelector('[class*="crimeTitle__"]');
@@ -133,10 +133,12 @@ const UI = {
     // One line under the header: your $/N here, the best crime now, and this crime's status.
     {
       const parts = [`${r.name}: ${fmt.perN(r.rate)} (${r.source})`];
-      if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}`);
+      if (top && top.typeID !== typeID) parts.push(`Best now: ${top.name} ${fmt.perN(top.rate)}${top.switchedFrom && top.switchedFrom.startsWith(r.name) ? ` (${r.name} dropped below it)` : ''}`);
       else if (top) parts.push('★ Best crime right now');
-      const cap = capWarning(readNerve());
+      const nv = readNerve();
+      const cap = capWarning(nv);
       if (cap) parts.push(cap);
+      if (nv && nv.cur < 2) parts.unshift(`Out of nerve (${nv.cur}N)`);
       let text = parts.join(' · ') + (r.note ? ` — ${r.note}` : '');
       if (!r.seenAt) {
         text = `Crime Advisor ${Diag.hooked ? 'is listening' : 'is NOT listening'} · crime data read this page load: ${Diag.read}` +

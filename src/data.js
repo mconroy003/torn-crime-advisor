@@ -103,6 +103,24 @@ function handleResponse(url, body, json, now = Date.now()) {
   if (typeID && db.crimesByType) {
     const fresh = trimDB(db);
     const prev = data.state[typeID];
+    // Forgery: materials are shared across projects as "open item % left + spare items", so the stock before and after
+    // a step shows how much of an item that step used (e.g. Glue 40% + 64 spares → 35% + 64 = 0.05 of a Glue).
+    if (typeID === 11 && step === 'attempt' && prev && prev.db) {
+      const stock = cbt => { const m = {}; ((cbt && cbt.projects) || []).forEach(p => ((p.additionalInfo && p.additionalInfo.usableItems) || [])
+        .forEach(u => { m[u.label] = (u.itemsAmount || 0) + (u.amount || 0) / 100; })); return m; };
+      const before = stock(prev.db.crimesByType), after = stock(fresh.crimesByType);
+      const used = data.used = data.used || {};
+      const u = used[11] = used[11] || { items: {}, names: {}, nerve: 0, actions: 0 };
+      u.names = u.names || {};
+      for (const [label, b] of Object.entries(before)) {
+        if (after[label] === undefined) continue;
+        const d = b - after[label];
+        if (d > 0 && d < 5) u.names[label] = (u.names[label] || 0) + d;
+      }
+      const lastSnap = data.last[11];
+      const dN = db.currentUserStats && lastSnap ? db.currentUserStats.nerveUsed - lastSnap.nerve : 0;
+      if (dN > 0 && dN <= 60) { u.nerve += dN; u.actions += 1; }
+    }
     // Items used up by this action: compare item counts the crime page lists (e.g. Arson accelerants) before and after.
     if (step === 'attempt' && prev && prev.db && prev.db.crimesByType && Array.isArray(fresh.crimesByType && fresh.crimesByType.availableItems)) {
       const before = Object.fromEntries((prev.db.crimesByType.availableItems || []).map(i => [i.itemID, i.total]));
