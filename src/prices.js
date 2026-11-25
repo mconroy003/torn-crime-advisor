@@ -12,6 +12,7 @@ const Prices = {
   setKey(k) {
     k = String(k || '').trim();
     if (k) localStorage.setItem(KEY_STORE, k); else localStorage.removeItem(KEY_STORE);
+    localStorage.removeItem(KEY_STORE + '.blocked'); this.blocked = 0;
     localStorage.removeItem(PRICE_STORE);
     this.byId = {}; this.byName = {}; this.fetchedAt = 0; this.error = '';
   },
@@ -42,11 +43,16 @@ const Prices = {
     const key = this.key();
     this.load();
     if (!key || this.loading || (this.fetchedAt && Date.now() - this.fetchedAt < PRICE_TTL)) return false;
+    if (localStorage.getItem(KEY_STORE + '.blocked')) { this.error = 'key not working; click "API key" to replace it'; return false; }
     this.loading = true;
     try {
       const res = await fetchFn(`https://api.torn.com/torn/?selections=items&key=${encodeURIComponent(key)}&comment=CrimeAdvisor`);
       const j = await res.json();
-      if (j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
+      if (j.error) {
+        // Torn asks tools to stop using keys that are invalid, paused or too limited, rather than retrying them.
+        if ([2, 10, 13, 16, 18].includes(j.error.code)) { this.blocked = j.error.code; localStorage.setItem(KEY_STORE + '.blocked', String(j.error.code)); }
+        throw new Error(`API error ${j.error.code}: ${j.error.error}${this.blocked ? ' (key paused here: click "API key" to fix it)' : ''}`);
+      }
       this.ingest(j.items, Date.now());
       localStorage.setItem(PRICE_STORE, JSON.stringify({ at: this.fetchedAt, items: j.items }));
       this.error = '';

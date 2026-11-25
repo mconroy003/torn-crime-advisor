@@ -65,7 +65,15 @@ function headerLine(text) {
     const key = h('button', 'ca-btn', Prices.key() ? 'API key ✓' : 'Add API key'); key.type = 'button'; key.id = 'ca-key';
     key.addEventListener('click', e => {
       e.preventDefault();
-      const k = prompt('Torn API key for item prices (Public access is enough). Stored in this browser only; sent only to api.torn.com. Leave empty to remove.', Prices.key());
+      const k = prompt([
+        'Torn API key for item prices. Leave empty to remove it.',
+        '',
+        'Data storage: item prices cached in this browser for 6 hours.',
+        'Data sharing: none. Nothing is sent anywhere except the price request to api.torn.com.',
+        'Purpose of use: valuing items used and earned by crimes.',
+        'Key storage & sharing: kept in this browser only, never shared.',
+        'Key access level: Public (one request every 6 hours: torn > items).',
+      ].join('\n'), Prices.key());
       if (k === null) return;
       Prices.setKey(k);
       key.textContent = Prices.key() ? 'API key ✓' : 'Add API key';

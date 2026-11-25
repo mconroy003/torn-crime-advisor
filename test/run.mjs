@@ -225,5 +225,16 @@ if (existsSync('test/fixtures/c2.json')) {
   ok(t.typeID !== 12 && /^Scamming is now/.test(t.switchedFrom || ''), 'top-pick switch is explained');
 }
 
+// API key errors: stop retrying an invalid key
+{
+  run(`Prices.setKey('BADKEY'); Prices.fetchedAt = 0;`);
+  ctx.__calls = 0;
+  ctx.__badFetch = async () => { ctx.__calls++; return { json: async () => ({ error: { code: 2, error: 'Incorrect key' } }) }; };
+  await run('Prices.refresh(__badFetch)');
+  await run('Prices.refresh(__badFetch)');
+  ok(ctx.__calls === 1 && /not working/.test(run('Prices.error')), `invalid key is used once, then paused (${ctx.__calls} call)`);
+  run(`Prices.setKey('')`);
+}
+
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);

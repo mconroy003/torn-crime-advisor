@@ -31,7 +31,9 @@ Click **Add API key** on the Advisor's green line and paste a Torn API key (Publ
 
 | Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
 | --- | --- | --- | --- | --- |
-| Item prices cached in your browser for 6 hours; crime stats in your browser | Nobody: nothing leaves your browser except the price request to api.torn.com | Valuing items used and earned by crimes | Stored in your browser's local storage only; sent only to api.torn.com | Public |
+| Item prices cached in your browser for 6 hours; crime stats in your browser | Nobody: nothing leaves your browser except the price request to api.torn.com | Valuing items used and earned by crimes | Stored in your browser's local storage only; sent only to api.torn.com | Public (one `torn > items` request every 6 hours) |
+
+If Torn rejects the key (invalid, paused or too limited), the Advisor stops using it until you enter a new one, as Torn's API rules ask.
 
 **Export data** on the same line downloads what the Advisor has saved (no API key included), for troubleshooting.
 
