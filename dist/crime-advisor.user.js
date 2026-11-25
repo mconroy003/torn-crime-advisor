@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.5.1
+// @version      0.5.2
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -767,7 +767,7 @@ const Analyzers = {
       options: [], detail: `Farming: ${farmTxt}`,
     };
   },
-  13(db) { // Arson: inquire (free) → make entry → place → ignite → (stoke/dampen) → collect
+  13(db) { // Arson: collect → light every hands-off job and let it burn → then work the jobs that need watching
     const c = db.crimesByType || {};
     const st = db.stats || {};
     const jobs = c.targets || [];
@@ -775,24 +775,48 @@ const Analyzers = {
     const perJob = st.rewardsCollected ? st.moneyFoundTotal / st.rewardsCollected : null;
     const nervePerJob = st.rewardsCollected ? st.nerveUsed / st.rewardsCollected : 23;
     const rate = perJob ? perJob / nervePerJob : null;
-    const act = j => (j.availableActions || [])[0] || {};
-    const needs = j => (j.icons || []).filter(i => /^B2$/.test(i.type) && Array.isArray(i.value));
+    const acts = j => (j.availableActions || []).map(a => a.title);
+    const first = j => (j.availableActions || [])[0] || {};
+    const needs = j => (j.icons || []).filter(i => i.type === 'B2' && Array.isArray(i.value));
     const missing = j => needs(j).some(i => !i.value.some(id => (have[id] || 0) > 0));
-    const collect = jobs.filter(j => (j.availableActions || []).some(a => /collect/i.test(a.title)));
-    const started = jobs.filter(j => !collect.includes(j) && act(j).title && !/inquire/i.test(act(j).title));
-    const fresh = jobs.filter(j => /inquire/i.test(act(j).title || ''));
+    // Damage rule: C2 total destruction and C4 "more than X%" can burn out on their own;
+    // C3 "less than X%" and C5 "between X and Y%" have a ceiling, so they need watching and dampening.
+    const ceiling = j => (j.icons || []).some(i => i.type === 'C3' || i.type === 'C5');
+    const isCollect = j => acts(j).some(t => /collect/i.test(t));
+    const isBurning = j => !isCollect(j) && (j.damage !== null && j.damage !== undefined || acts(j).some(t => /stoke|dampen/i.test(t)));
+    const notLit = j => !isCollect(j) && !isBurning(j);
+
+    const collect = jobs.filter(isCollect);
+    const progress = j => (/inquire/i.test(first(j).title || '') ? 0 : 1);   // jobs already started come first
+    const handsOff = jobs.filter(j => notLit(j) && !ceiling(j) && !missing(j)).sort((a, b) => progress(b) - progress(a));
+    const watched = jobs.filter(j => !isCollect(j) && ceiling(j) && !missing(j)).sort((a, b) => isBurning(b) - isBurning(a) || progress(b) - progress(a));
+    const burningAlone = jobs.filter(j => isBurning(j) && !ceiling(j));
+    const blocked = jobs.filter(j => notLit(j) && missing(j));
+    const rule = j => ((j.icons || []).find(i => /^C/.test(i.type)) || {}).title || 'no damage limit';
+    const nextAct = j => `${first(j).title}${first(j).nerve ? ` (${first(j).nerve}N)` : ' (free)'}`;
+
     const steps = [];
-    if (collect.length) steps.push({ action: `Collect ${collect.length} finished job${collect.length > 1 ? 's' : ''} (2N each, can't fail)`, perN: perJob ? perJob / 2 : null, nerve: 2, units: collect.length, why: `about ${fmt.money(perJob)} each` });
-    const ready = started.filter(j => !missing(j));
-    if (ready.length) steps.push({ action: `Continue ${ready[0].title} — ${act(ready[0]).title} (${act(ready[0]).nerve}N)${ready.length > 1 ? `, then ${ready.length - 1} more in progress` : ''}`, perN: rate, nerve: Math.round(nervePerJob), units: ready.length, why: `your average is ${fmt.money(perJob)} per job for ~${Math.round(nervePerJob)}N` });
-    if (fresh.length) steps.push({ action: `Inquire on ${fresh.length} new job${fresh.length > 1 ? 's' : ''} (free)`, perN: null, why: 'costs no nerve and shows what each job wants' });
-    const blocked = jobs.filter(missing).map(j => `${j.title} (needs ${needs(j)[0].title.replace(/^.*: /, '')})`);
-    const next = steps.find(s => s.perN !== null) || steps[0];
+    if (collect.length) steps.push({ action: `Collect ${collect.length} finished job${collect.length > 1 ? 's' : ''} (2N each, can't fail)`,
+      perN: perJob ? perJob / 2 : null, nerve: 2, units: collect.length, why: `about ${fmt.money(perJob)} each` });
+    if (handsOff.length) steps.push({ action: `Light ${handsOff[0].title}: ${nextAct(handsOff[0])}, through Ignite, then leave it to burn` +
+        (handsOff.length > 1 ? ` · ${handsOff.length - 1} more to light the same way` : ''),
+      perN: rate, nerve: 13, units: handsOff.length,
+      why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` });
+    if (watched.length) steps.push({ action: `Work ${watched[0].title} (${rule(watched[0])}): ${isBurning(watched[0]) ? 'watch it and dampen before it passes the limit' : nextAct(watched[0])}` +
+        (watched.length > 1 ? ` · ${watched.length - 1} more like it` : ''),
+      perN: rate, nerve: Math.round(nervePerJob), units: watched.length,
+      why: 'has a damage ceiling, so stay with it until you collect' });
+
+    const status = [
+      burningAlone.length ? `${burningAlone.length} burning on their own` : null,
+      blocked.length ? `missing items for ${blocked.slice(0, 2).map(j => `${j.title} (${needs(j)[0].title.replace(/^.*: /, '')})`).join(', ')}` : null,
+    ].filter(Boolean).join(' · ');
+    const next = steps[0];
     return {
       actionable: steps.length > 0,
-      note: next ? `Next: ${next.action}${next.why ? ' — ' + next.why : ''}` : 'No jobs',
-      steps, stepRate: next ? next.perN : null,
-      options: [], detail: blocked.length ? `Missing items for: ${blocked.slice(0, 3).join(', ')}` : '',
+      note: next ? `Next: ${next.action}${next.why ? ' — ' + next.why : ''}${status ? ' · ' + status : ''}`
+        : (burningAlone.length ? `Let ${burningAlone.length} fire${burningAlone.length > 1 ? 's' : ''} burn; collect when they finish` : 'No jobs'),
+      steps, stepRate: next ? next.perN : null, options: [],
     };
   },
 };

@@ -105,5 +105,21 @@ if (existsSync('test/fixtures/c2.json')) {
   ok(/Reply to 1 target/.test(mix.steps[0].action), `normal target with an expiry is still replyable (${mix.steps[0].action})`);
 }
 
+// Arson: light hands-off jobs first, never "continue" one that's burning on its own, watch ceiling jobs.
+{
+  const st = { rewardsCollected: 1330, moneyFoundTotal: 77.5e6, nerveUsed: 30873 };
+  const job = (title, icon, actions, damage = null) => ({ title, icons: [icon], availableActions: actions, damage });
+  ctx.__adb = { crimesByType: { targets: [
+    job('Shack', { type: 'C2', title: 'Total destruction required' }, [{ title: 'Stoke', nerve: 5 }, { title: 'Dampen', nerve: 5 }], 40),
+    job('Post Office', { type: 'C3', title: 'Less than 20% damage required' }, [{ title: 'Make Entry', nerve: 3 }]),
+    job('Car Wash', { type: 'C4', title: 'More than 25% damage required' }, [{ title: 'Make Entry', nerve: 3 }]),
+  ], availableItems: [] }, stats: st };
+  const a = run('Analyzers[13](__adb, Store.load(), {})');
+  ok(/^Light Car Wash/.test(a.steps[0].action), `hands-off job lit first (${a.steps[0].action})`);
+  ok(!a.steps.some(x => /Shack/.test(x.action)), 'burning total-destruction job is left alone');
+  ok(a.steps.some(x => /Post Office.*Less than 20%/.test(x.action)), 'ceiling job listed as one to work and watch');
+  ok(/1 burning on their own/.test(a.note), `note counts the fire burning alone (${a.note.slice(-40)})`);
+}
+
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);
