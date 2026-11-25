@@ -72,6 +72,14 @@ function saveRaw(typeID, step, json) {
     localStorage.setItem(RAW_KEY, JSON.stringify(raw));
   } catch { /* storage full: skip */ }
 }
+function setSetting(kind, name, value) {
+  const data = Store.load();
+  data.settings = data.settings || {};
+  data.settings[kind] = data.settings[kind] || {};
+  if (value === null || value === undefined) delete data.settings[kind][name]; else data.settings[kind][name] = Number(value);
+  Store.save();
+  return data.settings;
+}
 function exportRaw() {
   const blob = new Blob([JSON.stringify({ raw: JSON.parse(localStorage.getItem(RAW_KEY) || '{}'), advisor: Store.load() }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');

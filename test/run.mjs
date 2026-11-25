@@ -73,9 +73,10 @@ if (existsSync('test/fixtures/c2.json')) {
   atTime('2026-11-23T21:00:00Z');
   ctx.__rows = run('rankAll(Store.load()).rows');
   const plan = run('planNerve(__rows, {cur:130, max:130})');
+  const plan64 = run('planNerve(__rows.filter(r => r.typeID !== 10), {cur:64, max:130})');
   console.log('\nPLAN 130N:', run('planText')(plan, { cur: 130 }));
   ok(plan.steps.length > 0 && plan.left < 130, 'planner spends nerve');
-  ok(!plan.steps.some(s => s.crime === 'Forgery'), 'Forgery estimate excluded from the plan');
+  ok(plan64.steps.some(s => s.crime === 'Forgery'), 'Forgery Passport counts in the plan once materials are known');
   ok(run('capWarning({cur:120,max:130})') === 'Nerve full in ~50 min', 'cap warning within the hour');
   const burg = run('rankAll(Store.load()).rows').find(r => r.typeID === 7);
   ok(!/Could not read/.test(burg.note), 'Burglary reads');
@@ -119,6 +120,26 @@ if (existsSync('test/fixtures/c2.json')) {
   ok(!a.steps.some(x => /Shack/.test(x.action)), 'burning total-destruction job is left alone');
   ok(a.steps.some(x => /Post Office.*Less than 20%/.test(x.action)), 'ceiling job listed as one to work and watch');
   ok(/1 burning on their own/.test(a.note), `note counts the fire burning alone (${a.note.slice(-40)})`);
+}
+
+// Forgery: retry-based nerve and material cost
+{
+  atTime('2026-11-23T21:00:00Z');
+  const f = run('rankAll(Store.load())').rows.find(r => r.typeID === 11);
+  const pp = f.options.find(o => o.key === 'Passport');
+  console.log('  Passport:', pp.short, '|', pp.detail, '| gross', Math.round(pp.gross));
+  ok(pp.gross > 9200 && pp.gross < 9700, `Passport gross ~ $9.5k/N with your step success (${Math.round(pp.gross)})`);
+  ok(Math.abs(pp.perN - 8000) < 250, `Passport net ~ $8k/N after assumed materials (${Math.round(pp.perN)})`);
+  run("setSetting('materials', 'Passport', 150000)");
+  const pp2 = run('rankAll(Store.load())').rows.find(r => r.typeID === 11).options.find(o => o.key === 'Passport');
+  ok(pp2.perN < pp.perN && /yours/.test(pp2.detail), `your material cost overrides the assumption (${Math.round(pp2.perN)}/N)`);
+  run("setSetting('materials', 'Passport', null)");
+}
+
+// Hustling: no audience → nothing to do
+{
+  const h = run(`Analyzers[8]({ crimesByType: { shill: { additionalInfo: { moneyToCollect: 0 } }, pickpocket: { additionalInfo: { moneyToCollect: 0 } }, audience: { additionalInfo: { currentAudience: [] } } }, stats: { totalMoneyWon: 1, totalMoneyLost: 2 } }, Store.load(), {})`);
+  ok(!h.actionable && /no audience/.test(h.note), `Hustling with no crowd → skip (${h.note.slice(0, 60)})`);
 }
 
 require_write(); await new Promise(r => setTimeout(r, 50));

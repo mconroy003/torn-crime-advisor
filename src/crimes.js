@@ -77,6 +77,10 @@ function scamTargetWaiting(t) {
 }
 function scamTargetConcern(t) { return scamFlags(t).concern; }
 
+// Material cost per Forgery project when you haven't set your own (crimeAdvisorSet('materials', 'Passport', 90000)).
+// Passport: implied by a player's reported ~$8k/N net on $580k sales at ~61N (≈ $90k). Others: unknown until you set them.
+const FORGERY_MATERIAL_DEFAULT = { Passport: 90000 };
+
 const Analyzers = {
   9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
@@ -285,43 +289,66 @@ const Analyzers = {
     return { actionable: props.length > 0, note: `Next: ${next} · ${props.length} targets${soon ? `, ${soon} expiring soon` : ''}`, options: opts };
   },
 
-  8(db) { // Hustling: collect from accomplices first; the games themselves lose money at your level
+  8(db) { // Hustling: gather an audience → (shill / pickpocket work that audience) → collect. Games lose money for you.
     const c = db.crimesByType || {};
     const st = db.stats || {};
     const sh = (c.shill && c.shill.additionalInfo && c.shill.additionalInfo.moneyToCollect) || 0;
     const pp = (c.pickpocket && c.pickpocket.additionalInfo && c.pickpocket.additionalInfo.moneyToCollect) || 0;
+    const aud = (c.audience && c.audience.additionalInfo) || {};
+    const crowd = (aud.currentAudience || []).length;
     const steps = [];
+    // Money already earned can be collected; never suggest recruiting or relying on accomplices without a crowd.
     if (sh) steps.push({ action: `Collect ${fmt.money(sh)} from your shill (2N)`, perN: sh / 2, nerve: 2, units: 1 });
     if (pp) steps.push({ action: `Collect ${fmt.money(pp)} from your pickpocket (2N)`, perN: pp / 2, nerve: 2, units: 1 });
     const net = (st.totalMoneyWon || 0) - (st.totalMoneyLost || 0);
+    const accompliceTotal = (st.shillMoneyCollected || 0) + (st.pickpocketMoneyCollected || 0);
+    const why = crowd ? `${crowd} in your audience` : 'no audience, so your shill and pickpocket aren’t earning';
     return {
       actionable: steps.length > 0,
-      note: steps.length ? `Next: ${steps[0].action}` : `Nothing to collect · your games are ${fmt.money(net)} overall, so skip them for money`,
+      note: steps.length ? `Next: ${steps[0].action}` :
+        `Skip for money: ${why}; games are ${fmt.money(net)} for you overall` + (accompliceTotal ? ` (accomplices have brought in ${fmt.money(accompliceTotal)})` : ''),
       steps, stepRate: steps.length ? steps[0].perN : null, options: [],
     };
   },
-  11(db) { // Forgery
+  11(db, data) { // Forgery: start projects → advance each step (5N, retry on fail) → sell at the Print Store
     const c = db.crimesByType || {};
     const st = db.stats || {};
-    const att = Object.values(st.crimesByIDAttempts || {}).reduce((a, b) => a + b, 0);
-    const suc = Object.values(st.crimesByIDAttemptsSucc || {}).reduce((a, b) => a + b, 0);
-    const pStep = att ? (suc + 4) / (att + 5) : 0.9;
+    const settings = (data && data.settings) || {};
+    const ids = st.crimesByIDAttempts || {}, succ = st.crimesByIDAttemptsSucc || {};
+    // A failed step is retried, so each step costs 5N ÷ your success rate on that step (not one long all-or-nothing chain).
+    // Steps have few tries each, so use the project's pooled success rate (e.g. Passport 174/178) for every step.
+    const pooled = bp => { let a = 0, s2 = 0; for (let i = 1; i <= (bp.steps || []).length; i++) { a += ids[bp.crimeID + i] || 0; s2 += succ[bp.crimeID + i] || 0; } return (s2 + 1) / (a + 2); };
     const opts = (c.beginProject || []).filter(bp => bp.available !== false).map(bp => {
       const name = String(bp.title).replace(/^Begin /, '').replace(/ project$/, '');
       const price = REF.forgery[name.toLowerCase()];
       const steps = (bp.steps || []).length || 4;
-      const nerve = steps * 5;
-      const perN = price ? price * Math.pow(pStep, steps) / nerve : null;
-      return { key: name, perN, nerve, units: Infinity, src: 'before materials', noPick: true,
-        short: perN ? `est ${fmt.perN(perN)} · ${nerve}N` : 'price unknown',
-        label: name, detail: `${steps} steps · ${nerve}N · ${price ? fmt.money(price) + ' at the Print Store, before materials' : 'price unknown'}`,
-        sort: perN || 0 };
+      const nerve = steps * 5 / pooled(bp);
+      const setCost = settings.materials && settings.materials[name];
+      const defCost = FORGERY_MATERIAL_DEFAULT[name];
+      const cost = setCost ?? defCost ?? null;
+      const gross = price ? price / nerve : null;
+      const perN = price && cost !== null ? (price - cost) / nerve : gross;
+      const costTxt = setCost !== undefined ? `materials ${fmt.money(setCost)} (yours)`
+        : defCost !== undefined ? `materials ~${fmt.money(defCost)} (assumed)` : 'materials not set';
+      return {
+        key: name, perN, nerve: Math.round(nerve), units: Infinity, gross,
+        src: cost !== null ? 'after materials' : 'before materials', noPick: cost === null,
+        short: perN ? `${fmt.perN(perN)} · ${Math.round(nerve)}N` : 'price unknown',
+        label: name,
+        detail: `${steps} steps · ~${Math.round(nerve)}N with your step success · ${price ? fmt.money(price) + ' at the Print Store' : 'price unknown'} · ${costTxt}`,
+        sort: perN || 0,
+      };
     }).sort((a, b) => b.sort - a.sort);
     if (opts.length && opts[0].perN) opts[0].best = true;
     const n = (c.projects || []).length;
-    return { actionable: opts.some(o => o.perN), note: `${n} projects active${opts[0] && opts[0].perN ? ` · best: ${opts[0].label}` : ''}`, options: opts };
+    const best = opts.find(o => !o.noPick && o.perN) || opts[0];
+    const printers = c.totalPrinters ? `${c.totalPrinters - (c.totalPrintersInUse || 0)} of ${c.totalPrinters} printers free` : '';
+    return {
+      actionable: !!best,
+      note: best ? `Next: ${n ? `advance your ${n} project${n > 1 ? 's' : ''} where a step is ready, then ` : ''}start ${best.label} projects (${best.short}; ${best.detail.split(' · ').pop()})${printers ? ' · ' + printers : ''}` : 'No projects available',
+      options: opts,
+    };
   },
-
   12(db) { // Scamming: farm → spam wave → reply to targets → capitalize
     const c = db.crimesByType || {};
     const st = db.stats || {};
