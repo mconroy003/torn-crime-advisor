@@ -38,7 +38,7 @@ function planNerve(rows, nerve) {
   const look = rows.filter(r => r.newDay).map(r => r.name);
   cands.sort((a, b) => b.perN - a.perN);
   // Don't pad the plan with crimes worth under a quarter of the best one.
-  const floor = cands.length ? cands[0].perN / 4 : 0;
+  const floor = cands.length ? Math.min(cands[0].perN / 4, 2000) : 0;
   for (let i = cands.length - 1; i >= 0; i--) if (cands[i].perN < floor) cands.splice(i, 1);
   let left = nerve.cur;
   const steps = [];

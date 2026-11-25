@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.6.0
+// @version      0.7.0
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -412,6 +412,8 @@ const ReactBackup = {
 
 // Emforus: dead-body jobs are the top Disposal earners. Used only to order jobs until your own log has values.
 const DISPOSAL_PRIORITY = ['Dead Body', 'Body Part', 'Murder Weapon', 'Firearm', 'Vehicle'];
+// Emforus Crimes 2.0 guide (Jan 2025): Dead Body ~18k/N abandoned, ~12.5k/N buried; dead bodies show up about every 3 days.
+const DISPOSAL_PRIOR = { 'Dead Body': { Abandon: 18000, Bury: 12500 } };
 
 // How long each crime's live state stays trustworthy without a fresh look (minutes).
 // Daily crimes (Disposal, Cracking, Arson) get new jobs at 00:00 TCT instead.
@@ -499,10 +501,13 @@ const Analyzers = {
       });
       if (!methods.length) return null;
       // Learned $/N wins; otherwise pick the method with the best success per nerve (payout assumed set by job type).
+      const known = DISPOSAL_PRIOR[job.title];
+      if (known) methods.forEach(x => { if (!x.learned && known[x.m.title]) x.score = known[x.m.title] * x.sr.p; });
       methods.sort((a, b) => (b.learned ? 1 : 0) - (a.learned ? 1 : 0) || b.score - a.score);
       const best = methods[0];
       const pr = DISPOSAL_PRIORITY.indexOf(job.title);
-      const b = blend(ctx.rate, best.learned);
+      const prior = (DISPOSAL_PRIOR[job.title] && DISPOSAL_PRIOR[job.title][best.m.title]) ?? ctx.rate;
+      const b = blend(prior, best.learned);
       return {
         key: job.title, method: best.m.title, perN: b.perN, nerve: best.m.nerve, units: 1, src: b.src,
         short: `${best.m.title} · ${best.m.nerve}N · ${Math.round(best.sr.p * 100)}%` + (best.learned ? ` · ${fmt.perN(best.learned.perNerve)}` : ''),
@@ -633,7 +638,9 @@ const Analyzers = {
     const opts = marks.map(m => {
       const range = REF.pickpocketing[String(m.title).toLowerCase()];
       const sr = successRate(db.stats, m.crimeID);
-      const b = blend(range ? mid(range) * sr.p / (m.nerve || 5) : null, actionValue(data, 5, m.crimeID));
+      // Cyclists are worth far more than their cash: Emforus puts them at ~10k/N because ~1 in 15 drops Xanax.
+      const prior = /cyclist/i.test(m.title) ? 10000 : (range ? mid(range) * sr.p / (m.nerve || 5) : null);
+      const b = blend(prior, actionValue(data, 5, m.crimeID));
       const status = m.crimeInfo && m.crimeInfo.status ? m.crimeInfo.status.title : '';
       const learnedPP = actionValue(data, 5, m.crimeID);
       return { key: m.title, perN: b.perN, nerve: m.nerve || 5, units: 0, src: b.src, noPick: !learnedPP,
@@ -642,31 +649,38 @@ const Analyzers = {
         sort: b.perN || 0 };
     }).sort((a, b) => b.sort - a.sort);
     if (opts.length && opts[0].perN) opts[0].best = true;
-    return { actionable: true, note: 'Marks are live for seconds; the page labels show which are worth 5N', options: opts };
+    return { actionable: true, note: 'Hunt cyclists (~10k/N from Xanax drops); most other marks pay under 2k/N', options: opts };
   },
 
-  6(db) { // Card Skimming: install → let cards build → recover (4N) → sell in a batch (6N)
+  6(db) { // Card Skimming: install (busy spots) → let cards build → recover (4N) → sell in big batches (6N)
     const st = db.stats || {};
     const c = db.crimesByType || {};
     const subs = c.subCrimes || [];
     const perCard = st.cardDetailsSold ? (st.moneyMadeTotal || st.moneyFoundTotal) / st.cardDetailsSold : 215;
-    // Your typical haul per skimmer when recovered, and how often skimmers are lost.
     const avgHaul = st.skimmersRecovered ? st.cardDetailsRecovered / st.skimmersRecovered : 40;
     const lossRate = st.skimmersInstalled ? (st.skimmersLost || 0) / st.skimmersInstalled : 0.3;
     const ripe = subs.filter(s => s.crimeInfo && s.crimeInfo.cards >= avgHaul);
-    const cardsHeld = (c.sellCards && c.sellCards.additionalInfo && c.sellCards.additionalInfo.collectedCards) || 0;
+    const held = (c.sellCards && c.sellCards.additionalInfo && c.sellCards.additionalInfo.collectedCards) || 0;
+    const SELL_BATCH = 500; // Emforus: sell at least 500–1,000 details at once; bigger sales pay more per detail (wiki)
+    const where = [...new Set(subs.map(s => s.title))];
+    const slow = where.length && where.every(t => /gas station/i.test(t));
     const steps = [];
-    if (cardsHeld > 0) steps.push({ action: `Sell ${cardsHeld} card details (6N)`, perN: cardsHeld * perCard / 6, nerve: 6, units: 1, why: `~${fmt.money(perCard)} each` });
-    if (ripe.length) steps.push({ action: `Recover ${ripe.length} skimmer${ripe.length > 1 ? 's' : ''} with ${Math.round(avgHaul)}+ cards (4N each)`, perN: avgHaul * perCard / 4, nerve: 4, units: ripe.length, why: 'they hold your usual haul; waiting longer risks losing them' });
-    const active = st.skimmersActive || subs.length;
-    const installRate = avgHaul * perCard * (1 - lossRate) / (6 + 4 + 6 / Math.max(1, avgHaul / 10));
-    if (active < 20) steps.push({ action: `Install ${20 - active} more skimmer${20 - active > 1 ? 's' : ''} (6N each)`, perN: installRate, deferred: true, nerve: 6, units: 20 - active, why: `pays out over days; ${Math.round(lossRate * 100)}% of your skimmers get lost` });
-    const most = subs.reduce((m, s) => Math.max(m, (s.crimeInfo && s.crimeInfo.cards) || 0), 0);
+    if (held >= SELL_BATCH) steps.push({ action: `Sell your ${held} card details (6N)`, perN: held * perCard / 6, nerve: 6, units: 1, why: `~${fmt.money(perCard)} each; big batches pay more per detail` });
+    if (ripe.length) steps.push({ action: `Recover ${ripe.length} skimmer${ripe.length > 1 ? 's' : ''} with ${Math.round(avgHaul)}+ cards (4N each)`, perN: avgHaul * perCard / 4, nerve: 4, units: ripe.length,
+      why: 'they hold your usual haul; waiting longer risks losing them' });
+    const installRate = avgHaul * perCard * (1 - lossRate) / (6 + 4);
+    const tips = [];
+    if (held > 0 && held < SELL_BATCH) tips.push(`holding ${held} details: sell at ${SELL_BATCH}+`);
+    if (slow) tips.push('all at Gas Station (safest but slowest): put new ones at Bus Station or Post Office');
+    tips.push('recover before going offline for days');
+    const most = subs.reduce((mx, s2) => Math.max(mx, (s2.crimeInfo && s2.crimeInfo.cards) || 0), 0);
     const next = steps[0];
     return {
       actionable: !!next,
-      note: next ? `Next: ${next.action} — ${next.why}` : `Let them build: ${active} skimmers, fullest has ${Math.round(most)} cards (you usually recover at ~${Math.round(avgHaul)})`,
+      note: next ? `Next: ${next.action} — ${next.why} · ${tips.join(' · ')}`
+        : `Let them build: ${subs.length} skimmers, fullest has ${Math.round(most)} cards (you usually recover at ~${Math.round(avgHaul)}) · ${tips.join(' · ')}`,
       steps, stepRate: next ? next.perN : null, options: [],
+      installRate,
     };
   },
   7(db, data) { // Burglary
@@ -693,7 +707,7 @@ const Analyzers = {
     const next = ready.length ? `Burgle ${ready[0].title} (${ready[0].confidence}% confidence)`
       : props.length < 3 ? 'Scout for more targets (3N)'
       : `Case ${opts[0].key} to raise its confidence (2N)`;
-    return { actionable: props.length > 0, note: `Next: ${next} · ${props.length} targets${soon ? `, ${soon} expiring soon` : ''}`, options: opts };
+    return { actionable: props.length > 0, note: `Next: ${next} · ${props.length} targets${soon ? `, ${soon} expiring soon` : ''} · burgle at 40–60% confidence; industrial pays best; item drops aren't counted here`, options: opts };
   },
 
   8(db) { // Hustling: gather an audience → (shill / pickpocket work that audience) → collect. Games lose money for you.
@@ -713,7 +727,7 @@ const Analyzers = {
     return {
       actionable: steps.length > 0,
       note: steps.length ? `Next: ${steps[0].action}` :
-        `Skip for money: ${why}; games are ${fmt.money(net)} for you overall` + (accompliceTotal ? ` (accomplices have brought in ${fmt.money(accompliceTotal)})` : ''),
+        `Low earner: ${why}. Emforus puts maxed Hustling at ~3k/N; your games are ${fmt.money(net)} lifetime (includes leveling)` + (accompliceTotal ? ` · accomplices have brought in ${fmt.money(accompliceTotal)}` : ''),
       steps, stepRate: steps.length ? steps[0].perN : null, options: [],
     };
   },
@@ -951,7 +965,7 @@ function planNerve(rows, nerve) {
   const look = rows.filter(r => r.newDay).map(r => r.name);
   cands.sort((a, b) => b.perN - a.perN);
   // Don't pad the plan with crimes worth under a quarter of the best one.
-  const floor = cands.length ? cands[0].perN / 4 : 0;
+  const floor = cands.length ? Math.min(cands[0].perN / 4, 2000) : 0;
   for (let i = cands.length - 1; i >= 0; i--) if (cands[i].perN < floor) cands.splice(i, 1);
   let left = nerve.cur;
   const steps = [];

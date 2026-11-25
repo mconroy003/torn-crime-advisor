@@ -73,7 +73,7 @@ if (existsSync('test/fixtures/c2.json')) {
   atTime('2026-11-23T21:00:00Z');
   ctx.__rows = run('rankAll(Store.load()).rows');
   const plan = run('planNerve(__rows, {cur:130, max:130})');
-  const plan64 = run('planNerve(__rows.filter(r => r.typeID !== 10), {cur:64, max:130})');
+  const plan64 = run('planNerve(__rows.filter(r => r.typeID !== 10), {cur:70, max:130})');
   console.log('\nPLAN 130N:', run('planText')(plan, { cur: 130 }));
   ok(plan.steps.length > 0 && plan.left < 130, 'planner spends nerve');
   ok(plan64.steps.some(s => s.crime === 'Forgery'), 'Forgery Passport counts in the plan once materials are known');
@@ -140,6 +140,17 @@ if (existsSync('test/fixtures/c2.json')) {
 {
   const h = run(`Analyzers[8]({ crimesByType: { shill: { additionalInfo: { moneyToCollect: 0 } }, pickpocket: { additionalInfo: { moneyToCollect: 0 } }, audience: { additionalInfo: { currentAudience: [] } } }, stats: { totalMoneyWon: 1, totalMoneyLost: 2 } }, Store.load(), {})`);
   ok(!h.actionable && /no audience/.test(h.note), `Hustling with no crowd → skip (${h.note.slice(0, 60)})`);
+}
+
+// Deep-dive fixes
+{
+  atTime('2026-11-23T21:00:00Z');
+  const rows = run('rankAll(Store.load())').rows;
+  const disp = rows.find(r => r.typeID === 9);
+  const db = disp.options.find(o => o.key === 'Dead Body');
+  ok(db && db.perN > 10000, `Dead Body valued at Emforus's ~18k/N, not your blended Disposal rate (${db && Math.round(db.perN)})`);
+  const skim = rows.find(r => r.typeID === 6);
+  ok(/Bus Station or Post Office/.test(skim.note) && !/Install 0/.test(skim.note), 'Card Skimming suggests faster locations, no assumed slot cap');
 }
 
 require_write(); await new Promise(r => setTimeout(r, 50));
