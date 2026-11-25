@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crime Advisor
 // @namespace    mason.crime-advisor
-// @version      0.9.0
+// @version      0.9.1
 // @description  Read-only crime advisor for Torn Crimes 2.0: ranks crimes by your real cash per nerve and picks the best option on each crime page. Never clicks or sends requests.
 // @match        https://www.torn.com/loader.php?sid=crimes*
 // @match        https://www.torn.com/page.php?sid=crimes*
@@ -798,8 +798,8 @@ const Analyzers = {
     const where = [...new Set(subs.map(s => s.title))];
     const slow = where.length && where.every(t => /gas station/i.test(t));
     const steps = [];
-    if (held >= SELL_BATCH) steps.push({ action: `Sell your ${held} card details (6N)`, perN: held * perCard / 6, nerve: 6, units: 1, why: `~${fmt.money(perCard)} each; big batches pay more per detail` });
-    if (ripe.length) steps.push({ action: `Recover ${ripe.length} skimmer${ripe.length > 1 ? 's' : ''} with ${Math.round(avgHaul)}+ cards (4N each)`, perN: avgHaul * perCard / 4, nerve: 4, units: ripe.length,
+    if (held >= SELL_BATCH) steps.push({ label: 'sell card details', action: `Sell your ${held} card details (6N)`, perN: held * perCard / 6, nerve: 6, units: 1, why: `~${fmt.money(perCard)} each; big batches pay more per detail` });
+    if (ripe.length) steps.push({ label: 'recover full skimmers', action: `Recover ${ripe.length} skimmer${ripe.length > 1 ? 's' : ''} with ${Math.round(avgHaul)}+ cards (4N each)`, perN: avgHaul * perCard / 4, nerve: 4, units: ripe.length,
       why: 'they hold your usual haul; waiting longer risks losing them' });
     const installRate = avgHaul * perCard * (1 - lossRate) / (6 + 4);
     const tips = [];
@@ -922,9 +922,9 @@ const Analyzers = {
     ready.forEach(p => { const k = `${p.title} (step ${p.additionalInfo.step})`; byStep[k] = (byStep[k] || 0) + 1; });
     const stepList = Object.entries(byStep).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join(', ');
     const steps = [];
-    if (ready.length) steps.push({ action: `Advance ${ready.length} project${ready.length > 1 ? 's' : ''}, furthest along first: ${stepList}`,
+    if (ready.length) steps.push({ label: `advance ${projects[0] ? projects[0].projectTitle : 'project'} steps`, action: `Advance ${ready.length} project${ready.length > 1 ? 's' : ''}, furthest along first: ${stepList}`,
       perN: best ? best.perN : null, nerve: 5, units: ready.length, why: 'each step brings a Passport closer to its sale' });
-    if (best && best.perN) steps.push({ action: `Start new ${best.label} projects`, perN: best.perN, nerve: best.nerve, units: Infinity, deferred: true, why: best.detail.split(' · ').pop() });
+    if (best && best.perN) steps.push({ label: `start ${best.label} projects`, action: `Start new ${best.label} projects`, perN: best.perN, nerve: best.nerve, units: Infinity, deferred: true, why: best.detail.split(' · ').pop() });
     const warn = [
       blocked.length ? `${blocked.length} blocked: ${[...new Set(blocked.map(blockedReason))].join(', ')}` : null,
       dryingN ? `${dryingN} drying` : null,
@@ -965,17 +965,17 @@ const Analyzers = {
     const concerned = targets.filter(t => !waitingOn.includes(t) && scamTargetConcern(t));
     const replyable = targets.filter(t => !waitingOn.includes(t) && !concerned.includes(t));
     const steps = [];
-    if (concerned.length) steps.push({ action: `Resolve the concern on ${concerned.length} target${concerned.length > 1 ? 's' : ''} (3N per try)`, perN: workRate ? workRate * 0.5 : null, nerve: 3, units: concerned.length * 2,
+    if (concerned.length) steps.push({ label: 'resolve concerns', action: `Resolve the concern on ${concerned.length} target${concerned.length > 1 ? 's' : ''} (3N per try)`, perN: workRate ? workRate * 0.5 : null, nerve: 3, units: concerned.length * 2,
       why: 'concerns often take a few tries; you resolve about ' + (st.concernsAttempts ? Math.round(100 * (st.concernsResolved || 0) / st.concernsAttempts) : '?') + '% of attempts' });
     const tip = replyable.length ? scamBestReply(replyable[0]) : null;
     const tipTxt = tip ? ` · safest reply for ${replyable[0].name || 'the first'} (${replyable[0].scamMethod || 'scam'}): ${tip.name}${tip.reward ? `, ${Math.round(tip.reward * 100)}% chance to land in a reward zone` : ''}` : '';
-    if (replyable.length) steps.push({ action: `Reply to ${replyable.length} target${replyable.length > 1 ? 's' : ''} (3N per reply)${tipTxt}`, perN: workRate, nerve: 3, units: Math.round(replyable.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
+    if (replyable.length) steps.push({ label: 'reply to targets', action: `Reply to ${replyable.length} target${replyable.length > 1 ? 's' : ''} (3N per reply)${tipTxt}`, perN: workRate, nerve: 3, units: Math.round(replyable.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
     if (waitingOn.length && !replyable.length && !concerned.length) {
       const soonest = Math.min(...waitingOn.map(scamWaitSeconds).filter(x => x > 0));
       steps.push({ action: `Wait: ${waitingOn.length} target${waitingOn.length > 1 ? 's are' : ' is'} hesitating${Number.isFinite(soonest) ? ` (next free in ~${fmt.dur(soonest)})` : ' (usually 1–2 h)'}`, perN: null, wait: true });
     }
     if (c.awaitingResponses) steps.push({ action: 'Wait: responses are still coming in from your last wave', perN: null, wait: true });
-    else if (spam) steps.push({ action: `Send ${/^[AEIOU]/.test(spam.title.replace('Spam : ', '')) ? 'an' : 'a'} ${spam.title.replace('Spam : ', '')} wave (8N) if you have emails, else farm (8N)`, perN: waveRate, deferred: true, nerve: 8, units: 1,
+    else if (spam) steps.push({ label: `send a ${spam.title.replace('Spam : ', '').replace(' scam', '')} wave`, action: `Send ${/^[AEIOU]/.test(spam.title.replace('Spam : ', '')) ? 'an' : 'a'} ${spam.title.replace('Spam : ', '')} wave (8N) if you have emails, else farm (8N)`, perN: waveRate, deferred: true, nerve: 8, units: 1,
       why: `pays once replies arrive: ~${targetsPerWave.toFixed(1)} targets per wave, ~${Math.round(8 + targetsPerWave * nervePerTarget)}N in total${worn.length ? ` · worn out: ${worn.join(', ')}` : ''}` });
     if (!farming.length) steps.push({ action: 'Restart a scraper or phisher (Email Farming, 8N)', perN: null, why: 'emails feed every wave' });
     const next = steps[0];
@@ -1016,14 +1016,14 @@ const Analyzers = {
     const nextAct = j => `${first(j).title}${first(j).nerve ? ` (${first(j).nerve}N)` : ' (free)'}`;
 
     const steps = [];
-    if (collect.length) steps.push({ action: `Collect ${collect.length} finished job${collect.length > 1 ? 's' : ''} (2N each, can't fail)`,
+    if (collect.length) steps.push({ label: 'collect finished jobs', action: `Collect ${collect.length} finished job${collect.length > 1 ? 's' : ''} (2N each, can't fail)`,
       perN: perJob ? perJob / 2 : null, nerve: 2, units: collect.length, why: `about ${fmt.money(perJob)} each` });
-    if (handsOff.length) steps.push({ action: `Light ${handsOff[0].title}: ${nextAct(handsOff[0])}, through Ignite, then leave it to burn` +
+    if (handsOff.length) steps.push({ label: 'light hands-off jobs', action: `Light ${handsOff[0].title}: ${nextAct(handsOff[0])}, through Ignite, then leave it to burn` +
         (handsOff.length > 1 ? ` · ${handsOff.length - 1} more to light the same way` : ''),
       perN: rate, nerve: 13, units: handsOff.length,
       why: `${rule(handsOff[0])}, so it can burn out on its own; start these first so they burn while you do the rest` +
         (itemCost ? ` · accelerants cost you ~${fmt.perN(itemCost.perN)} (tracked over ${itemCost.nerve}N)` : '') });
-    if (watched.length) steps.push({ action: `Work ${watched[0].title} (${rule(watched[0])}): ${isBurning(watched[0]) ? 'watch it and dampen before it passes the limit' : nextAct(watched[0])}` +
+    if (watched.length) steps.push({ label: 'work watched jobs', action: `Work ${watched[0].title} (${rule(watched[0])}): ${isBurning(watched[0]) ? 'watch it and dampen before it passes the limit' : nextAct(watched[0])}` +
         (watched.length > 1 ? ` · ${watched.length - 1} more like it` : ''),
       perN: rate, nerve: Math.round(nervePerJob), units: watched.length,
       why: 'has a damage ceiling, so stay with it until you collect' });
@@ -1139,7 +1139,7 @@ function planNerve(rows, nerve) {
     if (r.steps) {
       // Multi-step crimes: only the steps that can be done now, each as many times as it really can be.
       r.steps.filter(st => !st.wait && st.perN > 0 && st.nerve).forEach(st =>
-        cands.push({ crime: r.name, label: st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
+        cands.push({ crime: r.name, label: st.label || st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
       return;
     }
     const opts = (r.options || []).filter(o => o.perN > 0 && o.units !== 0 && o.nerve && !o.noPick);

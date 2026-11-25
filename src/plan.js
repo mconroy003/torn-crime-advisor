@@ -27,7 +27,7 @@ function planNerve(rows, nerve) {
     if (r.steps) {
       // Multi-step crimes: only the steps that can be done now, each as many times as it really can be.
       r.steps.filter(st => !st.wait && st.perN > 0 && st.nerve).forEach(st =>
-        cands.push({ crime: r.name, label: st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
+        cands.push({ crime: r.name, label: st.label || st.action.replace(/ \(.*$/, ''), perN: st.perN, nerve: st.nerve, units: st.units || 1 }));
       return;
     }
     const opts = (r.options || []).filter(o => o.perN > 0 && o.units !== 0 && o.nerve && !o.noPick);
