@@ -57,6 +57,29 @@ function recordSnapshot(data, typeID, stats, crimeID, now) {
 
 const Diag = { hooked: false, seen: 0, read: 0, fromPage: 0, lastStep: '', lastError: '', pageLoadedAt: Date.now() };
 
+const isPlainObj = v => v && typeof v === 'object' && !Array.isArray(v);
+
+// Last raw response per crime and step, for troubleshooting. Run crimeAdvisorExport() in the console to download.
+const RAW_KEY = 'crimeAdvisor.raw';
+function saveRaw(typeID, step, json) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RAW_KEY) || '{}');
+    const copy = JSON.parse(JSON.stringify(json));
+    const cbt = copy.DB && copy.DB.crimesByType;
+    if (cbt && cbt.rig) delete cbt.rig.chassis;
+    if (copy.DB) { delete copy.DB.apiKey; delete copy.DB.currentUserStatistics; delete copy.DB.allowedCrimesTypes; }
+    raw[`${typeID}:${step}`] = { at: new Date().toISOString(), response: copy };
+    localStorage.setItem(RAW_KEY, JSON.stringify(raw));
+  } catch { /* storage full: skip */ }
+}
+function exportRaw() {
+  const blob = new Blob([JSON.stringify({ raw: JSON.parse(localStorage.getItem(RAW_KEY) || '{}'), advisor: Store.load() }, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `crime-advisor-export-${new Date().toISOString().slice(0, 16).replace(':', '')}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 function handleResponse(url, body, json, now = Date.now()) {
   if (!url || !String(url).includes('sid=crimesData')) return false;
   Diag.seen += 1;
@@ -69,7 +92,20 @@ function handleResponse(url, body, json, now = Date.now()) {
   const data = Store.load();
   if (db.user && typeof db.user.nerve === 'number') data.user = { nerve: db.user.nerve, at: now };
   if (step === 'hub' && db.crimesTypes) data.hubSeenAt = now;
-  if (typeID && db.crimesByType) data.state[typeID] = { seenAt: now, db: trimDB(db) };
+  if (typeID && db.crimesByType) {
+    const fresh = trimDB(db);
+    const prev = data.state[typeID];
+    // A crime result can carry less than the full page (e.g. no rig section after a crack attempt).
+    // Merge it into what we already have instead of replacing it, so missing parts keep their last value.
+    if (step !== 'crimesList' && prev && prev.db && isPlainObj(prev.db.crimesByType) && isPlainObj(fresh.crimesByType)) {
+      fresh.crimesByType = { ...prev.db.crimesByType, ...fresh.crimesByType };
+      for (const k of ['generalInfo', 'dirtyBomb', 'stats']) if (!fresh[k]) fresh[k] = prev.db[k];
+    }
+    data.state[typeID] = { seenAt: now, db: fresh };
+    const rig = fresh.crimesByType && fresh.crimesByType.rig;
+    if (rig && parseFloat(rig.bruteforcePower)) data.rigPower = parseFloat(rig.bruteforcePower);
+  }
+  if (typeID) saveRaw(typeID, step, json);
   if (typeID && db.currentUserStats) {
     recordSnapshot(data, typeID, db.currentUserStats, step === 'attempt' ? crimeID : null, now);
   }

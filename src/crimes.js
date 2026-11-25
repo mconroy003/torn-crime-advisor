@@ -51,6 +51,32 @@ function sfcByClock(title, now) {
   return null;                                     // Subway (players online) and Beach (tide) need a look
 }
 
+
+// Scamming targets: the field names for hesitation/concern aren't confirmed yet, so look for them broadly.
+// A target counts as waiting when it is hesitating or otherwise on a timer you can't act through.
+function scamFlags(t) {
+  const text = JSON.stringify(t).toLowerCase();
+  return { hesitation: /hesitat|cooldown|cooling/.test(text), concern: /concern/.test(text) };
+}
+function scamWaitSeconds(t) {
+  const now = Date.now() / 1000;
+  let best = 0;
+  (function walk(o, depth) {
+    if (!o || typeof o !== 'object' || depth > 3) return;
+    for (const [k, v] of Object.entries(o)) {
+      if (typeof v === 'number' && /hesitat|cooldown|until/i.test(k) && v > now && v < now + 86400) best = best ? Math.min(best, v - now) : v - now;
+      else if (typeof v === 'object') walk(v, depth + 1);
+    }
+  })(t, 0);
+  return best;
+}
+function scamTargetWaiting(t) {
+  const f = scamFlags(t);
+  if (f.hesitation) return true;
+  return scamWaitSeconds(t) > 0 && !f.concern;
+}
+function scamTargetConcern(t) { return scamFlags(t).concern; }
+
 const Analyzers = {
   9(db, data, ctx) { // Disposal
     const jobs = (db.crimesByType && db.crimesByType.objects) || [];
@@ -83,11 +109,11 @@ const Analyzers = {
     };
   },
 
-  10(db) { // Cracking
+  10(db, data) { // Cracking
     const cbt = db.crimesByType || {};
     const brute = successRate(db.stats, 205).p;
     // Each brute-force attempt clears about "bruteforcePower" characters/layers (your stats: ~3 attempts per password).
-    const power = Math.max(1, parseFloat(cbt.rig && cbt.rig.bruteforcePower) || 1);
+    const power = Math.max(1, parseFloat(cbt.rig && cbt.rig.bruteforcePower) || data.rigPower || 1);
     const opts = (cbt.targets || []).filter(t => !t.isCracked && !(t.expire && t.expire * 1000 < Date.now())).map(t => {
       const chars = t.password || [];
       const units = chars.reduce((s, c) => s + ((c.char && c.char !== '*') ? 0 : (c.status || 0)), 0);
@@ -319,8 +345,17 @@ const Analyzers = {
     const spam = fresh[0] || null;
     const farming = (c.farming && c.farming.currentOngoing) || [];
     const farmTxt = farming.length ? farming.map(f => `${f.type} ${f.currentValue.toLocaleString('en-US')}`).join(', ') : 'no scraper or phisher running';
+    const waitingOn = targets.filter(scamTargetWaiting);
+    const concerned = targets.filter(t => !waitingOn.includes(t) && scamTargetConcern(t));
+    const replyable = targets.filter(t => !waitingOn.includes(t) && !concerned.includes(t));
     const steps = [];
-    if (targets.length) steps.push({ action: `Reply to your ${targets.length} target${targets.length > 1 ? 's' : ''} (3N per reply)`, perN: workRate, nerve: 3, units: Math.round(targets.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
+    if (concerned.length) steps.push({ action: `Resolve the concern on ${concerned.length} target${concerned.length > 1 ? 's' : ''} (3N per try)`, perN: workRate ? workRate * 0.5 : null, nerve: 3, units: concerned.length * 2,
+      why: 'concerns often take a few tries; you resolve about ' + (st.concernsAttempts ? Math.round(100 * (st.concernsResolved || 0) / st.concernsAttempts) : '?') + '% of attempts' });
+    if (replyable.length) steps.push({ action: `Reply to ${replyable.length} target${replyable.length > 1 ? 's' : ''} (3N per reply)`, perN: workRate, nerve: 3, units: Math.round(replyable.length * nervePerTarget / 3), why: `you average ${fmt.money(perTarget)} per target for ~${Math.round(nervePerTarget)}N` });
+    if (waitingOn.length && !replyable.length && !concerned.length) {
+      const soonest = Math.min(...waitingOn.map(scamWaitSeconds).filter(x => x > 0));
+      steps.push({ action: `Wait: ${waitingOn.length} target${waitingOn.length > 1 ? 's are' : ' is'} hesitating${Number.isFinite(soonest) ? ` (next free in ~${fmt.dur(soonest)})` : ' (usually 1–2 h)'}`, perN: null, wait: true });
+    }
     if (c.awaitingResponses) steps.push({ action: 'Wait: responses are still coming in from your last wave', perN: null, wait: true });
     else if (spam) steps.push({ action: `Send ${/^[AEIOU]/.test(spam.title.replace('Spam : ', '')) ? 'an' : 'a'} ${spam.title.replace('Spam : ', '')} wave (8N) if you have emails, else farm (8N)`, perN: waveRate, deferred: true, nerve: 8, units: 1,
       why: `pays once replies arrive: ~${targetsPerWave.toFixed(1)} targets per wave, ~${Math.round(8 + targetsPerWave * nervePerTarget)}N in total${worn.length ? ` · worn out: ${worn.join(', ')}` : ''}` });

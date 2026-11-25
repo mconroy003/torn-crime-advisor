@@ -82,5 +82,28 @@ if (existsSync('test/fixtures/c2.json')) {
   console.log('  Burglary:', burg.note, '|', (burg.options[0] || {}).short);
 }
 
+// Fix: a crack attempt that leaves out the rig section must not change the nerve estimate.
+if (existsSync('test/fixtures/c2.json')) {
+  atTime('2026-11-23T21:00:00Z');
+  const before = run('rankAll(Store.load()).rows').find(r => r.typeID === 10).rate;
+  ctx.__t = JSON.parse(JSON.stringify(run('Store.load().state[10].db.crimesByType.targets')));
+  ctx.__now = Date.parse('2026-11-23T21:00:00Z');
+  run(`handleResponse('/page.php?sid=crimesData&step=attempt&typeID=10&crimeID=205', null, {DB:{crimesByType:{targets:__t}}}, __now)`);
+  const after = run('rankAll(Store.load()).rows').find(r => r.typeID === 10).rate;
+  ok(Math.abs(after - before) < 1, `Cracking estimate kept after an attempt without rig data (${Math.round(before)} → ${Math.round(after)})`);
+}
+
+// Fix: scam targets that are hesitating or have a concern aren't "reply now".
+{
+  const st = { targetsScammedSucc: 800, targetsScammedFail: 200, moneyAwarded: 112e6, crimesByIDAttempts: { 291: 400, 292: 7000 }, concernsAttempts: 400, concernsResolved: 140 };
+  ctx.__db = (targets) => ({ crimesByType: { targets, methods: [], farming: { currentOngoing: [{ type: 'scraper', currentValue: 10 }] } }, stats: st });
+  const hes = run(`Analyzers[12](__db([{ title: 'A', state: { name: 'Hesitation' } }]), Store.load(), {})`);
+  ok(hes.steps[0].wait && !hes.actionable, `hesitating target → wait (${hes.note})`);
+  const con = run(`Analyzers[12](__db([{ title: 'B', zone: 'concern' }]), Store.load(), {})`);
+  ok(/Resolve the concern/.test(con.steps[0].action), `concern target → resolve (${con.steps[0].action})`);
+  const mix = run(`Analyzers[12](__db([{ title: 'A', state: 'hesitation' }, { title: 'C', expire: ${Math.floor(Date.now() / 1000) + 3600} }]), Store.load(), {})`);
+  ok(/Reply to 1 target/.test(mix.steps[0].action), `normal target with an expiry is still replyable (${mix.steps[0].action})`);
+}
+
 require_write(); await new Promise(r => setTimeout(r, 50));
 process.exit(fails ? 1 : 0);
